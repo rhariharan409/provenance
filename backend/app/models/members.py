@@ -46,3 +46,4 @@ class Member(Base):
             sqlite_where=(github_login.isnot(None))
         ),
     )
+

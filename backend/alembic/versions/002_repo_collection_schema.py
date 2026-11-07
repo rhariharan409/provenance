@@ -165,3 +165,4 @@ def downgrade() -> None:
     op.drop_column('projects', 'default_branch')
     op.drop_column('projects', 'github_repo')
     op.drop_column('projects', 'github_owner')
+

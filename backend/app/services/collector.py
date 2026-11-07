@@ -15,6 +15,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models.projects import Project, ProjectStatus
 from app.models.pull_requests import PullRequest, Review
+from app.models.author_aliases import AuthorAlias
 from app.services.github_client import GitHubClient, RepoAccessError
 from app.services.identity import (
     RawCommitData,
@@ -23,6 +24,46 @@ from app.services.identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _remove_readonly(func, path, excinfo):
+    import stat
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
+def _safe_rmtree(path: str) -> None:
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path, onexc=_remove_readonly)
+        except Exception:
+            try:
+                shutil.rmtree(path, onerror=_remove_readonly)
+            except Exception:
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def _sanitize_git_error(stderr: str, secrets: List[Optional[str]]) -> str:
+    cleaned = stderr or ""
+    for s in secrets:
+        if s:
+            cleaned = cleaned.replace(s, "[REDACTED]")
+
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    fatal_lines = [l for l in lines if l.lower().startswith("fatal:") or l.lower().startswith("error:")]
+    if fatal_lines:
+        first_err = fatal_lines[0]
+    elif lines:
+        non_cloning = [l for l in lines if not l.lower().startswith("cloning into")]
+        first_err = non_cloning[0] if non_cloning else lines[0]
+    else:
+        first_err = "fatal: clone process exited with an error"
+
+    return f"Clone failed: {first_err}"
+
 
 # Strict repository URL pattern
 GITHUB_URL_PATTERN = re.compile(
@@ -225,15 +266,17 @@ def run_collection(
             )
             project.clone_path = clone_path
 
-            if os.path.exists(clone_path):
-                shutil.rmtree(clone_path, ignore_errors=True)
+            _safe_rmtree(clone_path)
 
             temp_hooks_dir = tempfile.mkdtemp(prefix="git_empty_hooks_")
 
             clone_env = os.environ.copy()
             clone_env["GIT_TERMINAL_PROMPT"] = "0"
 
-            if token:
+            # For public repos where no GitHub App installation token exists, do NOT send any
+            # Authorization header to git. Clone anonymously, and use the PAT only for API calls.
+            # Only use the extraheader for GitHub App installation tokens (private repos).
+            if auth_res.installation_id and token:
                 auth_header = f"Authorization: Basic {base64.b64encode(f'x-access-token:{token}'.encode()).decode()}"
                 clone_env["GIT_CONFIG_COUNT"] = "1"
                 clone_env["GIT_CONFIG_KEY_0"] = "http.extraheader"
@@ -265,7 +308,8 @@ def run_collection(
 
             if proc.returncode != 0:
                 project.status = ProjectStatus.failed
-                project.error_message = "Failed to clone repository. Please verify access permissions."
+                secrets_to_mask = [token, settings.GITHUB_API_TOKEN]
+                project.error_message = _sanitize_git_error(proc.stderr, secrets_to_mask)
                 db.commit()
                 return
 
@@ -441,6 +485,6 @@ def run_collection(
             db.close()
 
     finally:
-        if temp_hooks_dir and os.path.exists(temp_hooks_dir):
-            shutil.rmtree(temp_hooks_dir, ignore_errors=True)
+        if temp_hooks_dir:
+            _safe_rmtree(temp_hooks_dir)
         COLLECTION_SEMAPHORE.release()

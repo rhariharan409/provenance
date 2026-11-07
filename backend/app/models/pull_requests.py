@@ -58,3 +58,4 @@ class Review(Base):
     __table_args__ = (
         Index("ix_reviews_pull_request_id", "pull_request_id"),
     )
+

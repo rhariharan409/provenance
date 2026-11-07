@@ -368,3 +368,4 @@ def sync_identities_and_commits_to_db(
             db.add(contribution)
 
     db.commit()
+

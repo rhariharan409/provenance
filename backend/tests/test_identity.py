@@ -172,3 +172,4 @@ def test_re_run_preserves_manual_assignments():
     assert resolved[key].login == "charlie_gh"
     assert resolved[key].source == AliasSource.manual
     assert resolved[key].existing_manual_member_id == mock_member_id
+

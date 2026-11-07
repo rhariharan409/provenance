@@ -75,3 +75,4 @@ def test_url_validation_rejects_empty_and_non_strings():
         validate_and_parse_github_url("")
     with pytest.raises(ValueError):
         validate_and_parse_github_url(None)  # type: ignore
+

@@ -134,3 +134,4 @@ def test_invalid_url_rejected_422(authenticated_client):
         json={"repo_url": "https://gitlab.com/notgithub/repo"}
     )
     assert res.status_code == 422
+

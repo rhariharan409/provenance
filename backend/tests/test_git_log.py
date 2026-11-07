@@ -119,3 +119,4 @@ def test_git_log_parser_with_real_git_repo():
         assert bob_commit.subject == "Bob's feature implementation"
         assert bob_commit.additions == 1
         assert bob_commit.files_changed == 1
+

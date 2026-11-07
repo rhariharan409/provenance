@@ -43,3 +43,4 @@ class Commit(Base):
         Index("uq_commits_project_sha", "project_id", "sha", unique=True),
         Index("ix_commits_project_authored_at", "project_id", "authored_at"),
     )
+

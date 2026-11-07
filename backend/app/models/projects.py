@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Text, Uuid, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
@@ -49,8 +49,21 @@ class Project(Base):
         nullable=False
     )
 
+    # Section 2 columns
+    github_owner: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    github_repo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    default_branch: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    github_installation_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    clone_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    warnings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    commit_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_collected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     owner = relationship("User", backref="projects")
 
     __table_args__ = (
         Index("ix_projects_owner_id", "owner_id"),
+        Index("uq_projects_owner_lower_repo", "owner_id", func.lower(repo_full_name), unique=True),
     )

@@ -29,3 +29,8 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Section 2 data and secrets
+backend/data/
+backend/secrets/
+*.pem

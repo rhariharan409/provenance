@@ -1,4 +1,5 @@
 import React from "react";
+import Link from "next/link";
 
 export default function EmptyState() {
   return (
@@ -8,17 +9,9 @@ export default function EmptyState() {
       </p>
 
       <div className="flex flex-col items-center gap-2">
-        <button
-          type="button"
-          disabled
-          aria-disabled="true"
-          className="btn-primary"
-        >
+        <Link href="/projects/new" className="btn-primary">
           Add project
-        </button>
-        <span className="text-text-muted text-[12px]">
-          Available in the next release.
-        </span>
+        </Link>
       </div>
     </div>
   );

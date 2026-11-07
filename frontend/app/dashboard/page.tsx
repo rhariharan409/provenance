@@ -1,8 +1,9 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import TopBar from "@/components/TopBar";
 import EmptyState from "@/components/EmptyState";
-import { getCurrentUser } from "@/lib/api";
+import { getCurrentUser, getProjects } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,8 @@ export default async function DashboardPage() {
   if (!user) {
     redirect("/");
   }
+
+  const projects = await getProjects(rawCookie);
 
   const formattedLastLogin = user.last_login_at
     ? new Date(user.last_login_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
@@ -40,8 +43,79 @@ export default async function DashboardPage() {
             <h1 className="text-[20px] font-semibold text-text tracking-tight">
               Projects
             </h1>
+            <Link href="/projects/new" className="btn-primary">
+              Add project
+            </Link>
           </div>
-          <EmptyState />
+
+          {projects.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-bg/50">
+                      <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                        Name
+                      </th>
+                      <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                        Status
+                      </th>
+                      <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
+                        Commits
+                      </th>
+                      <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                        Last Collected
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {projects.map((p) => {
+                      const lastCollectedStr = p.last_collected_at
+                        ? new Date(p.last_collected_at)
+                            .toISOString()
+                            .replace("T", " ")
+                            .replace(/\..+/, " UTC")
+                        : "—";
+
+                      return (
+                        <tr
+                          key={p.id}
+                          className="hover:bg-bg/40 transition-colors duration-120"
+                        >
+                          <td className="py-3 px-4">
+                            <Link
+                              href={`/projects/${p.id}`}
+                              className="font-mono text-[13px] text-accent hover:underline font-medium"
+                            >
+                              {p.repo_full_name}
+                            </Link>
+                            {p.is_private && (
+                              <span className="ml-2 text-[11px] font-mono border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted">
+                                private
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="inline-block text-[12px] font-medium border border-border px-2 py-0.5 rounded-[4px] bg-surface capitalize text-text">
+                              {p.status}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-[13px] tabular-nums text-text">
+                            {p.commit_total.toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[13px] tabular-nums text-text-muted">
+                            {lastCollectedStr}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="space-y-3">

@@ -549,3 +549,4 @@ def run_analysis(
 
     finally:
         proj_lock.release()
+

@@ -95,3 +95,4 @@ def is_ignored(path: str, size_bytes: Optional[int] = None, max_size_kb: Optiona
         return True, f"file_size_exceeded: {size_bytes} > {cap_kb * 1024} bytes"
 
     return False, ""
+

@@ -54,3 +54,4 @@ class AnalysisRun(Base):
         Index("ix_analysis_runs_project_id", "project_id"),
         Index("ix_analysis_runs_project_status", "project_id", "status"),
     )
+

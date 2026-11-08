@@ -112,3 +112,4 @@ def calculate_final_scores(
         }
 
     return percentages, per_member_signals, eff_weights
+

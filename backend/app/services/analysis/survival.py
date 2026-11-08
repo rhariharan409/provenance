@@ -105,3 +105,4 @@ def process_file_blame(
             results.unlinked_authors.add(email)
 
     return file_meaningful_count
+

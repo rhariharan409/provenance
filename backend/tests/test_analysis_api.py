@@ -195,3 +195,4 @@ def test_get_scores_and_evidence(authenticated_client, test_project, db_session)
     assert len(ev_data["owned_modules"]) == 1
     assert "summary_sentence" in ev_data
     assert "Alice Dev" in ev_data["summary_sentence"]
+

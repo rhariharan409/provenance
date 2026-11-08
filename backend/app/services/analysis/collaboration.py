@@ -76,3 +76,4 @@ def compute_collaboration_scores(
             normalized_shares[m_id] = 0.0
 
     return raw_scores, normalized_shares, has_collaboration_data
+

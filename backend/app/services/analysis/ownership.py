@@ -44,3 +44,4 @@ def compute_module_ownership(
             member_ownership_signals[best_member] += effective_owned_lines / total_surviving_lines
 
     return member_ownership_signals, member_owned_modules
+

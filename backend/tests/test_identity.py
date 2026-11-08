@@ -173,3 +173,80 @@ def test_re_run_preserves_manual_assignments():
     assert resolved[key].source == AliasSource.manual
     assert resolved[key].existing_manual_member_id == mock_member_id
 
+
+def test_case_insensitive_member_deduplication_devendiran(db_session, test_user):
+    """
+    Regression test: GitHub logins are case-insensitive.
+    Different cases like 'Devendiran2007' and 'devendiran2007' must resolve to
+    the exact same Member record (normalized to lower()) and never create two members.
+    """
+    from app.models.projects import Project, ProjectStatus
+    from app.models.members import Member
+    from app.models.contributions import Contribution
+    from app.services.identity import sync_identities_and_commits_to_db, ResolvedAlias
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Create project
+    project = Project(
+        owner_id=test_user.id,
+        repo_url="https://github.com/test/case-test.git",
+        repo_full_name="test/case-test",
+        name="case-test",
+        status=ProjectStatus.ready,
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    # 2. Commit authored with capitalized login 'Devendiran2007'
+    commit_1 = RawCommitData(
+        sha="sha_dev_1",
+        author_name="devendiran2007",
+        author_email="devendirank61@gmail.com",
+        authored_at=now,
+        subject="Initial commit",
+    )
+    # API match resolves to capitalized login 'Devendiran2007'
+    sha_to_login = {"sha_dev_1": "Devendiran2007"}
+    resolved = resolve_identities([commit_1], sha_to_login)
+
+    # Verify resolve_identities normalized login to lower
+    key = ("devendirank61@gmail.com".lower(), "devendiran2007".lower())
+    assert resolved[key].login == "devendiran2007"
+
+    # 3. Simulate sync where PR extra logins contains lowercase 'devendiran2007'
+    # and resolved_aliases has capitalized 'Devendiran2007'
+    resolved[key].login = "Devendiran2007"  # inject capitalized login directly to test sync resilience
+    pr_extra_logins = ["devendiran2007", "Devendiran2007"]
+
+    sync_identities_and_commits_to_db(
+        db=db_session,
+        project_id=project.id,
+        resolved_aliases=resolved,
+        commits=[commit_1],
+        pr_extra_logins=pr_extra_logins,
+    )
+
+    # 4. Assert only ONE member exists for this project
+    members = db_session.query(Member).filter(Member.project_id == project.id).all()
+    assert len(members) == 1, f"Expected 1 member, found {len(members)}: {[m.github_login for m in members]}"
+    assert members[0].github_login == "devendiran2007"
+
+    # 5. Assert only ONE contribution row exists for this project
+    contribs = db_session.query(Contribution).filter(Contribution.project_id == project.id).all()
+    assert len(contribs) == 1, f"Expected 1 contribution row, found {len(contribs)}"
+    assert contribs[0].github_login == "devendiran2007"
+
+    # 6. Re-run sync with alternative casing and verify no duplicate is produced
+    sync_identities_and_commits_to_db(
+        db=db_session,
+        project_id=project.id,
+        resolved_aliases=resolved,
+        commits=[commit_1],
+        pr_extra_logins=["DEVONDIRAN2007"],
+    )
+    members_after = db_session.query(Member).filter(Member.project_id == project.id).all()
+    assert len(members_after) == 1
+
+

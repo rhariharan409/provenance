@@ -305,3 +305,4 @@ def test_security_audit_no_shell_true_in_analysis():
                         assert isinstance(kw.value, ast.Constant) and kw.value.value is False, (
                             f"Disallowed shell={kw.value.value} in {py_file}"
                         )
+

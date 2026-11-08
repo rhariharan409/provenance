@@ -436,7 +436,7 @@ def assign_alias(
             if not contrib and m.github_login:
                 contrib = db.query(Contribution).filter(
                     Contribution.project_id == id,
-                    Contribution.github_login == m.github_login
+                    func.lower(Contribution.github_login) == m.github_login.strip().lower()
                 ).first()
             if contrib:
                 contrib.commit_count = c_count
@@ -444,7 +444,7 @@ def assign_alias(
                 db.add(Contribution(
                     project_id=id,
                     user_id=m.user_id,
-                    github_login=m.github_login or "unknown",
+                    github_login=m.github_login.strip().lower() if m.github_login else "unknown",
                     commit_count=c_count
                 ))
     db.commit()
@@ -496,10 +496,11 @@ def merge_members(
     db.flush()
 
     # Delete source member contribution row
-    db.query(Contribution).filter(
-        Contribution.project_id == id,
-        Contribution.github_login == source_member.github_login
-    ).delete()
+    if source_member.github_login:
+        db.query(Contribution).filter(
+            Contribution.project_id == id,
+            func.lower(Contribution.github_login) == source_member.github_login.strip().lower()
+        ).delete()
 
     db.delete(source_member)
     db.commit()
@@ -515,7 +516,7 @@ def merge_members(
     if not contrib and target_member.github_login:
         contrib = db.query(Contribution).filter(
             Contribution.project_id == id,
-            Contribution.github_login == target_member.github_login
+            func.lower(Contribution.github_login) == target_member.github_login.strip().lower()
         ).first()
 
     if contrib:
@@ -524,7 +525,7 @@ def merge_members(
         db.add(Contribution(
             project_id=id,
             user_id=target_member.user_id,
-            github_login=target_member.github_login or "unknown",
+            github_login=target_member.github_login.strip().lower() if target_member.github_login else "unknown",
             commit_count=c_count
         ))
     db.commit()

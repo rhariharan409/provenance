@@ -203,3 +203,4 @@ def compute_commit_effective_change(
 
     dampened = calculate_dampened_lines(meaningful_lines, cap)
     return dampened, raw_total, False, note
+

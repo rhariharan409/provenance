@@ -38,7 +38,7 @@ def parse_noreply_email(email: str) -> Optional[str]:
         return None
     match = NOREPLY_PATTERN.match(email.strip())
     if match:
-        return match.group(2)
+        return match.group(2).lower()
     return None
 
 
@@ -130,13 +130,14 @@ def resolve_identities(
         # Check existing manual assignment
         if key in manual_map:
             manual_login, manual_member_id = manual_map[key]
-            is_bot = is_bot_identity(name, manual_login)
+            manual_login_clean = manual_login.strip().lower() if manual_login else None
+            is_bot = is_bot_identity(name, manual_login_clean)
             resolved[key] = ResolvedAlias(
                 name=name,
                 email=email,
                 commit_count=count,
                 commit_shas=shas,
-                login=manual_login,
+                login=manual_login_clean,
                 source=AliasSource.manual,
                 is_bot=is_bot,
                 existing_manual_member_id=manual_member_id
@@ -146,20 +147,21 @@ def resolve_identities(
         # a) Noreply email match
         noreply_login = parse_noreply_email(email)
         if noreply_login:
-            is_bot = is_bot_identity(name, noreply_login)
+            noreply_login_clean = noreply_login.strip().lower()
+            is_bot = is_bot_identity(name, noreply_login_clean)
             resolved[key] = ResolvedAlias(
                 name=name,
                 email=email,
                 commit_count=count,
                 commit_shas=shas,
-                login=noreply_login,
+                login=noreply_login_clean,
                 source=AliasSource.noreply,
                 is_bot=is_bot
             )
             continue
 
         # b) API match: most common login for this alias's commit shas
-        matched_logins = [sha_to_login[s] for s in shas if s in sha_to_login and sha_to_login[s]]
+        matched_logins = [sha_to_login[s].strip().lower() for s in shas if s in sha_to_login and sha_to_login[s]]
         if matched_logins:
             most_common_login = Counter(matched_logins).most_common(1)[0][0]
             is_bot = is_bot_identity(name, most_common_login)
@@ -191,7 +193,7 @@ def resolve_identities(
     name_to_login: Dict[str, str] = {}
     for alias in resolved.values():
         if alias.login and not alias.is_bot:
-            name_to_login[alias.name.strip().lower()] = alias.login
+            name_to_login[alias.name.strip().lower()] = alias.login.strip().lower()
 
     for key, alias in resolved.items():
         if alias.login is None and not alias.is_bot:
@@ -218,22 +220,22 @@ def sync_identities_and_commits_to_db(
     # 1. Fetch existing members for this project
     existing_members = db.query(Member).filter(Member.project_id == project_id).all()
     member_by_login: Dict[str, Member] = {
-        m.github_login.lower(): m for m in existing_members if m.github_login
+        m.github_login.strip().lower(): m for m in existing_members if m.github_login
     }
 
-    # 2. Gather all non-bot logins that should have a Member record
+    # 2. Gather all non-bot logins that should have a Member record (normalized with lower())
     all_logins: Set[str] = set()
     for alias in resolved_aliases.values():
         if alias.login and not alias.is_bot:
-            all_logins.add(alias.login)
+            all_logins.add(alias.login.strip().lower())
 
     for extra_login in pr_extra_logins:
-        if extra_login and not is_bot_identity(extra_login, extra_login):
-            all_logins.add(extra_login)
+        cleaned_extra = extra_login.strip().lower() if extra_login else ""
+        if cleaned_extra and not is_bot_identity(cleaned_extra, cleaned_extra):
+            all_logins.add(cleaned_extra)
 
-    # 3. Create or find Member for each login
-    for login in all_logins:
-        login_lower = login.lower()
+    # 3. Create or find Member for each login (always lowercased)
+    for login_lower in sorted(all_logins):
         if login_lower not in member_by_login:
             # Check if a Provenance user exists with matching username
             matching_user = db.query(User).filter(
@@ -242,7 +244,7 @@ def sync_identities_and_commits_to_db(
 
             member = Member(
                 project_id=project_id,
-                github_login=login,
+                github_login=login_lower,
                 display_name=matching_user.display_name if matching_user else None,
                 user_id=matching_user.id if matching_user else None
             )
@@ -250,8 +252,9 @@ def sync_identities_and_commits_to_db(
             db.flush()
             member_by_login[login_lower] = member
         else:
-            # If member exists but user_id is null, attempt to link
             member = member_by_login[login_lower]
+            if member.github_login != login_lower:
+                member.github_login = login_lower
             if not member.user_id:
                 matching_user = db.query(User).filter(
                     func.lower(User.username) == login_lower
@@ -273,7 +276,7 @@ def sync_identities_and_commits_to_db(
     for key, resolved_alias in resolved_aliases.items():
         target_member_id = None
         if resolved_alias.login and not resolved_alias.is_bot:
-            target_member = member_by_login.get(resolved_alias.login.lower())
+            target_member = member_by_login.get(resolved_alias.login.strip().lower())
             if target_member:
                 target_member_id = target_member.id
 
@@ -340,7 +343,7 @@ def sync_identities_and_commits_to_db(
             a.commit_count for a in member.aliases if not a.is_bot
         )
 
-        # Check existing contribution
+        # Check existing contribution (case-insensitive)
         contribution = None
         if member.user_id:
             contribution = db.query(Contribution).filter(
@@ -351,18 +354,20 @@ def sync_identities_and_commits_to_db(
         if not contribution and member.github_login:
             contribution = db.query(Contribution).filter(
                 Contribution.project_id == project_id,
-                Contribution.github_login == member.github_login
+                func.lower(Contribution.github_login) == member.github_login.strip().lower()
             ).first()
 
         if contribution:
             contribution.commit_count = member_commit_count
             if member.user_id:
                 contribution.user_id = member.user_id
+            if member.github_login and contribution.github_login != member.github_login.strip().lower():
+                contribution.github_login = member.github_login.strip().lower()
         else:
             contribution = Contribution(
                 project_id=project_id,
                 user_id=member.user_id,
-                github_login=member.github_login or "unknown",
+                github_login=member.github_login.strip().lower() if member.github_login else "unknown",
                 commit_count=member_commit_count
             )
             db.add(contribution)

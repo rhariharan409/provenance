@@ -58,3 +58,4 @@ class ContributionScore(Base):
         Index("ix_contribution_scores_project_id", "project_id"),
         Index("ix_contribution_scores_member_id", "member_id"),
     )
+

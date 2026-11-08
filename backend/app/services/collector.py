@@ -364,8 +364,9 @@ def run_collection(
             pr_extra_logins: List[str] = []
             for pr_item in prs_data:
                 author_login = pr_item.get("author_login")
-                if author_login:
-                    pr_extra_logins.append(author_login)
+                author_login_clean = author_login.strip().lower() if author_login else None
+                if author_login_clean:
+                    pr_extra_logins.append(author_login_clean)
 
                 pr_num = pr_item["number"]
                 existing_pr = db.query(PullRequest).filter(
@@ -381,7 +382,7 @@ def run_collection(
                         project_id=project.id,
                         number=pr_num,
                         title=pr_item.get("title", ""),
-                        author_login=author_login,
+                        author_login=author_login_clean,
                         state=pr_item.get("state", "closed"),
                         merged=pr_item.get("merged", False),
                         created_at=created_at_dt or datetime.now(timezone.utc),
@@ -391,6 +392,8 @@ def run_collection(
                     db.flush()
                 else:
                     pr_record = existing_pr
+                    if author_login_clean and pr_record.author_login != author_login_clean:
+                        pr_record.author_login = author_login_clean
                     pr_record.state = pr_item.get("state", "closed")
                     pr_record.merged = pr_item.get("merged", False)
                     pr_record.merged_at = merged_at_dt
@@ -399,21 +402,22 @@ def run_collection(
                 # Add reviews
                 for rev_item in pr_item.get("reviews", []):
                     rev_login = rev_item.get("reviewer_login")
-                    if rev_login:
-                        pr_extra_logins.append(rev_login)
+                    rev_login_clean = rev_login.strip().lower() if rev_login else None
+                    if rev_login_clean:
+                        pr_extra_logins.append(rev_login_clean)
 
                     sub_dt = _parse_iso_datetime(rev_item.get("submitted_at"))
 
                     # Avoid duplicate review rows
                     existing_rev = db.query(Review).filter(
                         Review.pull_request_id == pr_record.id,
-                        Review.reviewer_login == rev_login,
+                        func.lower(Review.reviewer_login) == rev_login_clean,
                         Review.state == rev_item.get("state", "COMMENTED")
-                    ).first()
-                    if not existing_rev and rev_login:
+                    ).first() if rev_login_clean else None
+                    if not existing_rev and rev_login_clean:
                         rev_record = Review(
                             pull_request_id=pr_record.id,
-                            reviewer_login=rev_login,
+                            reviewer_login=rev_login_clean,
                             state=rev_item.get("state", "COMMENTED"),
                             submitted_at=sub_dt,
                         )
@@ -431,7 +435,7 @@ def run_collection(
             manual_map: Dict[Tuple[str, str], Tuple[Optional[str], Optional[uuid.UUID]]] = {}
             for a in existing_manual_aliases:
                 if a.source.value == "manual":
-                    member_login = a.member.github_login if a.member else None
+                    member_login = a.member.github_login.strip().lower() if (a.member and a.member.github_login) else None
                     manual_map[(a.email.strip().lower(), a.name.strip().lower())] = (
                         member_login,
                         a.member_id,

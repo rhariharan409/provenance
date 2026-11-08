@@ -119,24 +119,36 @@ def run_comparison(ground_truth_path: Optional[str] = None):
             )
 
             members = db.query(Member).filter(Member.project_id == project.id).all()
-            member_id_to_login = {m.id: (m.github_login or "").lower() for m in members}
+            member_id_to_lower = {m.id: (m.github_login or "").strip().lower() for m in members}
+            lower_to_stored_login = {
+                (m.github_login or "").strip().lower(): m.github_login
+                for m in members if m.github_login
+            }
 
             app_scores_map: Dict[str, float] = {}
             for s in scores:
-                login = member_id_to_login.get(s.member_id, "")
-                if login:
-                    app_scores_map[login] = float(s.share_percent)
+                login_lower = member_id_to_lower.get(s.member_id, "")
+                if login_lower:
+                    app_scores_map[login_lower] = float(s.share_percent)
 
             # Compute raw commit count percentages
             contribs = db.query(Contribution).filter(Contribution.project_id == project.id).all()
             total_raw_commits = sum(c.commit_count for c in contribs)
             raw_commit_map: Dict[str, float] = {}
             for c in contribs:
-                c_login = c.github_login.lower()
+                c_login_lower = c.github_login.strip().lower()
                 c_share = (c.commit_count / total_raw_commits * 100.0) if total_raw_commits > 0 else 0.0
-                raw_commit_map[c_login] = round(c_share, 2)
+                raw_commit_map[c_login_lower] = raw_commit_map.get(c_login_lower, 0.0) + c_share
 
-            all_logins = sorted(set(expected_map.keys()) | set(app_scores_map.keys()))
+            # Normalize expected map keys to lowercase
+            expected_norm: Dict[str, float] = {}
+            expected_orig_key: Dict[str, str] = {}
+            for k, v in expected_map.items():
+                k_lower = k.strip().lower()
+                expected_norm[k_lower] = float(v)
+                expected_orig_key[k_lower] = k
+
+            all_lower_logins = sorted(set(expected_norm.keys()) | set(app_scores_map.keys()))
 
             header = f"{'Login':<20} | {'Expected %':<11} | {'App %':<9} | {'Err (App)':<10} | {'Commit %':<10} | {'Err (Commit)':<12}"
             print(header)
@@ -149,10 +161,17 @@ def run_comparison(ground_truth_path: Optional[str] = None):
             abs_errors_app: List[float] = []
             abs_errors_commit: List[float] = []
 
-            for login in all_logins:
-                exp_val = float(expected_map.get(login, 0.0))
-                app_val = float(app_scores_map.get(login.lower(), 0.0))
-                com_val = float(raw_commit_map.get(login.lower(), 0.0))
+            for lower_login in all_lower_logins:
+                # Print each member once using the app's stored login
+                display_login = (
+                    lower_to_stored_login.get(lower_login)
+                    or expected_orig_key.get(lower_login)
+                    or lower_login
+                )
+
+                exp_val = float(expected_norm.get(lower_login, 0.0))
+                app_val = float(app_scores_map.get(lower_login, 0.0))
+                com_val = float(raw_commit_map.get(lower_login, 0.0))
 
                 err_app = abs(app_val - exp_val)
                 err_com = abs(com_val - exp_val)
@@ -165,7 +184,7 @@ def run_comparison(ground_truth_path: Optional[str] = None):
                 abs_errors_commit.append(err_com)
 
                 print(
-                    f"{login:<20} | {exp_val:>10.2f}% | {app_val:>8.2f}% | {err_app:>9.2f}% | {com_val:>9.2f}% | {err_com:>11.2f}%"
+                    f"{display_login:<20} | {exp_val:>10.2f}% | {app_val:>8.2f}% | {err_app:>9.2f}% | {com_val:>9.2f}% | {err_com:>11.2f}%"
                 )
 
             # Metrics

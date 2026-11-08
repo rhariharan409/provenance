@@ -72,3 +72,4 @@ export default function PassportActions({ code }: PassportActionsProps) {
     </div>
   );
 }
+

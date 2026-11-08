@@ -676,7 +676,8 @@ export async function getMyPassports(): Promise<UserPassportItem[]> {
 
 export async function revokePassport(code: string): Promise<boolean> {
   try {
-    const response = await fetch(`/api/passports/${code}`, {
+    if (!code) return false;
+    const response = await fetch(`/api/passports/${encodeURIComponent(code)}`, {
       method: "DELETE",
       headers: { Accept: "application/json" },
     });
@@ -686,12 +687,33 @@ export async function revokePassport(code: string): Promise<boolean> {
   }
 }
 
+export const revokePassportClient = revokePassport;
+
 export async function getPublicPassportServer(code: string): Promise<PublicPassportData | null> {
   try {
-    const response = await fetch(`${BACKEND_URL}/public/passports/${code}`, {
+    if (!code) return null;
+    const response = await fetch(`${BACKEND_URL}/public/passports/${encodeURIComponent(code)}`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
+    });
+    if (response.status === 404 || !response.ok) {
+      return null;
+    }
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+export const getPublicPassport = getPublicPassportServer;
+
+export async function verifyPassportClient(code: string): Promise<VerifyPassportResult | null> {
+  try {
+    if (!code) return null;
+    const response = await fetch(`/api/public/passports/${encodeURIComponent(code)}/verify`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
     });
     if (!response.ok) return null;
     return await response.json();
@@ -700,18 +722,7 @@ export async function getPublicPassportServer(code: string): Promise<PublicPassp
   }
 }
 
-export async function verifyPassportClient(code: string): Promise<VerifyPassportResult | null> {
-  try {
-    const response = await fetch(`/api/public/passports/${code}/verify`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
+export const verifyPassport = verifyPassportClient;
 
 export async function createDispute(
   projectId: string,

@@ -89,3 +89,4 @@ class Passport(Base):
             sqlite_where=(revoked_at.is_(None)),
         ),
     )
+

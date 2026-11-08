@@ -80,3 +80,4 @@ class Dispute(Base):
     run = relationship("AnalysisRun", backref="disputes")
     raiser = relationship("User", foreign_keys=[raised_by], backref="raised_disputes")
     resolver = relationship("User", foreign_keys=[resolved_by], backref="resolved_disputes")
+

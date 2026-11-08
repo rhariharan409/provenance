@@ -99,3 +99,4 @@ def downgrade() -> None:
     op.drop_index('ix_passports_project_id', table_name='passports')
     op.drop_index('ix_passports_code', table_name='passports')
     op.drop_table('passports')
+

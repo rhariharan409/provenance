@@ -200,3 +200,4 @@ def build_snapshot(
         "notes": notes_dict,
     }
     return snapshot
+

@@ -39,7 +39,7 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${sourceSerif4.variable} h-full`}
     >
-      <body className="min-h-full flex flex-col bg-bg text-text antialiased">
+      <body className={`${ibmPlexSans.className} min-h-full flex flex-col bg-bg text-text antialiased`}>
         {children}
       </body>
     </html>

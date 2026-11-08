@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -13,7 +14,12 @@ from app.models.members import Member
 from app.models.projects import Project
 from app.models.summaries import MemberSummary
 from app.models.users import User, UserRole
-from app.services.auth_access import check_project_read_access, check_project_write_access, is_faculty_or_admin_on_project
+from app.services.auth_access import (
+    check_project_read_access,
+    check_project_write_access,
+    is_faculty_or_admin_on_project,
+    is_reviewer_on_project,
+)
 from app.services.summary import generate_member_summary
 
 logger = logging.getLogger(__name__)
@@ -43,7 +49,7 @@ def generate_project_summaries(
     if not latest_run:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No completed analysis run found to generate summaries.",
+            detail="Run analysis first.",
         )
 
     scores = (
@@ -110,7 +116,7 @@ def get_project_summaries(
     id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> List[Dict[str, Any]]:
+) -> Any:
     """
     Returns summaries for the latest run:
       - Owner, assigned faculty, and admin see all members' summaries.
@@ -123,21 +129,7 @@ def get_project_summaries(
 
     is_privileged = is_faculty_or_admin_on_project(project, current_user, db)
 
-    latest_run = (
-        db.query(AnalysisRun)
-        .filter(AnalysisRun.project_id == id, AnalysisRun.status == AnalysisRunStatus.complete)
-        .order_by(AnalysisRun.started_at.desc())
-        .first()
-    )
-    if not latest_run:
-        return []
-
-    members_map = {
-        m.id: m
-        for m in db.query(Member).filter(Member.project_id == id).all()
-    }
-
-    # If not owner/faculty/admin, find if user is a member of this project
+    # If not owner/faculty/admin, verify user is a member of this project
     user_member_id: Optional[uuid.UUID] = None
     if not is_privileged:
         user_member = (
@@ -148,6 +140,24 @@ def get_project_summaries(
         if not user_member:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         user_member_id = user_member.id
+
+    latest_run = (
+        db.query(AnalysisRun)
+        .filter(AnalysisRun.project_id == id, AnalysisRun.status == AnalysisRunStatus.complete)
+        .order_by(AnalysisRun.started_at.desc())
+        .first()
+    )
+    if not latest_run:
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"summaries": [], "needs_analysis": True},
+            headers={"X-Needs-Analysis": "true"},
+        )
+
+    members_map = {
+        m.id: m
+        for m in db.query(Member).filter(Member.project_id == id).all()
+    }
 
     query = db.query(MemberSummary).filter(MemberSummary.run_id == latest_run.id)
     if not is_privileged and user_member_id:
@@ -167,3 +177,4 @@ def get_project_summaries(
         }
         for s in summaries
     ]
+

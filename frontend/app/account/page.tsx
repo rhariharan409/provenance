@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getCurrentUser, deleteMyAccount, exportMyData, UserProfile } from "@/lib/api";
+import { formatDateTime } from "@/lib/date";
 
 export default function AccountPage() {
   const router = useRouter();
@@ -100,12 +101,8 @@ export default function AccountPage() {
 
   if (!user) return null;
 
-  const formattedCreated = user.created_at
-    ? new Date(user.created_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
-    : "—";
-  const formattedLastLogin = user.last_login_at
-    ? new Date(user.last_login_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
-    : "—";
+  const formattedCreated = formatDateTime(user.created_at);
+  const formattedLastLogin = formatDateTime(user.last_login_at);
 
   return (
     <div className="min-h-full flex flex-col bg-bg">

@@ -1,11 +1,15 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import jwt
 import httpx
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class RepoAccessError(Exception):
@@ -268,6 +272,134 @@ class GitHubClient:
 
         return sha_to_login, warnings
 
+    def list_pull_requests_and_reviews_graphql(
+        self,
+        owner: str,
+        repo: str,
+        token: str,
+        max_prs: int,
+    ) -> Optional[Tuple[List[Dict[str, Any]], List[str]]]:
+        """
+        Attempts to fetch pull requests and their reviews in a single GraphQL query.
+        Returns (prs, warnings) on success, or None to fall back to REST.
+        """
+        if not token:
+            return None
+
+        query = """
+        query GetPullRequestsAndReviews($owner: String!, $name: String!, $cursor: String, $pageSize: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequests(first: $pageSize, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                number
+                title
+                author {
+                  login
+                }
+                state
+                merged
+                createdAt
+                mergedAt
+                reviews(first: 100) {
+                  nodes {
+                    author {
+                      login
+                    }
+                    state
+                    submittedAt
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+
+        prs: List[Dict[str, Any]] = []
+        warnings: List[str] = []
+        cursor: Optional[str] = None
+
+        try:
+            with self._create_client(token) as client:
+                while len(prs) < max_prs:
+                    page_size = min(100, max_prs - len(prs))
+                    payload = {
+                        "query": query,
+                        "variables": {
+                            "owner": owner,
+                            "name": repo,
+                            "cursor": cursor,
+                            "pageSize": page_size,
+                        },
+                    }
+                    resp = client.post("https://api.github.com/graphql", json=payload)
+                    if self._check_rate_limit(resp, warnings):
+                        break
+
+                    if resp.status_code != 200:
+                        logger.debug("GraphQL query returned status %d: %s", resp.status_code, resp.text[:200])
+                        return None
+
+                    data = resp.json()
+                    if data.get("errors") or not data.get("data", {}).get("repository"):
+                        logger.debug("GraphQL returned errors or empty repository: %s", data.get("errors"))
+                        return None
+
+                    repo_data = data["data"]["repository"]
+                    pr_conn = repo_data.get("pullRequests") or {}
+                    nodes = pr_conn.get("nodes") or []
+                    if not nodes:
+                        break
+
+                    for node in nodes:
+                        pr_num = node.get("number")
+                        pr_title = node.get("title", "")
+                        author_obj = node.get("author") or {}
+                        pr_author = author_obj.get("login")
+                        pr_state = (node.get("state") or "CLOSED").lower()
+                        is_merged = bool(node.get("merged", False))
+                        pr_created_at = node.get("createdAt")
+                        pr_merged_at = node.get("mergedAt")
+
+                        reviews_list: List[Dict[str, Any]] = []
+                        rev_nodes = (node.get("reviews") or {}).get("nodes") or []
+                        for r in rev_nodes:
+                            r_author = (r.get("author") or {}).get("login")
+                            if r_author:
+                                reviews_list.append({
+                                    "reviewer_login": r_author,
+                                    "state": r.get("state", "COMMENTED"),
+                                    "submitted_at": r.get("submittedAt"),
+                                })
+
+                        prs.append({
+                            "number": pr_num,
+                            "title": pr_title,
+                            "author_login": pr_author,
+                            "state": pr_state,
+                            "merged": is_merged,
+                            "created_at": pr_created_at,
+                            "merged_at": pr_merged_at,
+                            "reviews": reviews_list,
+                        })
+
+                        if len(prs) >= max_prs:
+                            break
+
+                    page_info = pr_conn.get("pageInfo") or {}
+                    if not page_info.get("hasNextPage"):
+                        break
+                    cursor = page_info.get("endCursor")
+
+            return prs, warnings
+        except Exception as e:
+            logger.debug("GraphQL PR fetch failed, falling back to REST: %s", e)
+            return None
+
     def list_pull_requests_and_reviews(
         self,
         owner: str,
@@ -277,8 +409,14 @@ class GitHubClient:
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Lists pull requests and their reviews.
+        Prefers GraphQL query when token is available; falls back to concurrent REST requests.
         Returns (list_of_pr_dicts, warnings).
         """
+        if token:
+            gql_res = self.list_pull_requests_and_reviews_graphql(owner, repo, token, max_prs)
+            if gql_res is not None:
+                return gql_res
+
         prs: List[Dict[str, Any]] = []
         warnings: List[str] = []
         page = 1
@@ -301,6 +439,7 @@ class GitHubClient:
                 if not items or not isinstance(items, list):
                     break
 
+                batch_prs = []
                 for item in items:
                     pr_num = item.get("number")
                     pr_title = item.get("title", "")
@@ -310,24 +449,7 @@ class GitHubClient:
                     pr_created_at = item.get("created_at")
                     pr_merged_at = item.get("merged_at")
 
-                    # Fetch reviews for this PR
-                    reviews_list: List[Dict[str, Any]] = []
-                    if pr_num:
-                        rev_resp = client.get(f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_num}/reviews")
-                        self._check_rate_limit(rev_resp, warnings)
-                        if rev_resp.status_code == 200:
-                            rev_items = rev_resp.json()
-                            if isinstance(rev_items, list):
-                                for r in rev_items:
-                                    rev_user = r.get("user", {}).get("login") if r.get("user") else None
-                                    if rev_user:
-                                        reviews_list.append({
-                                            "reviewer_login": rev_user,
-                                            "state": r.get("state", "COMMENTED"),
-                                            "submitted_at": r.get("submitted_at")
-                                        })
-
-                    prs.append({
+                    batch_prs.append({
                         "number": pr_num,
                         "title": pr_title,
                         "author_login": pr_author,
@@ -335,13 +457,51 @@ class GitHubClient:
                         "merged": is_merged,
                         "created_at": pr_created_at,
                         "merged_at": pr_merged_at,
-                        "reviews": reviews_list
+                        "reviews": [],
                     })
-
-                    if len(prs) >= max_prs:
+                    if len(prs) + len(batch_prs) >= max_prs:
                         break
 
-                if len(items) < per_page:
+                # Fetch reviews concurrently for batch_prs using bounded pool
+                def fetch_reviews(pr_n: Optional[int]) -> List[Dict[str, Any]]:
+                    if not pr_n:
+                        return []
+                    try:
+                        with self._create_client(token) as sub_client:
+                            rev_resp = sub_client.get(f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_n}/reviews")
+                            self._check_rate_limit(rev_resp, warnings)
+                            if rev_resp.status_code == 200:
+                                rev_items = rev_resp.json()
+                                if isinstance(rev_items, list):
+                                    revs = []
+                                    for r in rev_items:
+                                        rev_user = r.get("user", {}).get("login") if r.get("user") else None
+                                        if rev_user:
+                                            revs.append({
+                                                "reviewer_login": rev_user,
+                                                "state": r.get("state", "COMMENTED"),
+                                                "submitted_at": r.get("submitted_at")
+                                            })
+                                    return revs
+                    except Exception:
+                        pass
+                    return []
+
+                workers = min(settings.GITHUB_CONCURRENCY, len(batch_prs)) if batch_prs else 1
+                with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                    future_to_idx = {
+                        pool.submit(fetch_reviews, p["number"]): idx
+                        for idx, p in enumerate(batch_prs)
+                    }
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            batch_prs[idx]["reviews"] = future.result()
+                        except Exception:
+                            batch_prs[idx]["reviews"] = []
+
+                prs.extend(batch_prs)
+                if len(items) < per_page or len(prs) >= max_prs:
                     break
                 page += 1
 

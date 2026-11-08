@@ -12,6 +12,7 @@ from app.routers import (
     summaries_router,
     originality_router,
     account_router,
+    reviews_router,
 )
 
 app = FastAPI(
@@ -34,6 +35,7 @@ ROUTERS = [
     summaries_router,
     originality_router,
     account_router,
+    reviews_router,
 ]
 
 for router in ROUTERS:

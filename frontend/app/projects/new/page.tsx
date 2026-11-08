@@ -8,6 +8,7 @@ import { createProject } from "@/lib/api";
 export default function NewProjectPage() {
   const router = useRouter();
   const [repoUrl, setRepoUrl] = useState("");
+  const [historyWindow, setHistoryWindow] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
@@ -21,7 +22,7 @@ export default function NewProjectPage() {
     setInstallUrl(null);
 
     try {
-      const res = await createProject(repoUrl.trim());
+      const res = await createProject(repoUrl.trim(), historyWindow);
       if (res.ok && res.data?.id) {
         router.push(`/projects/${res.data.id}`);
       } else {
@@ -105,6 +106,28 @@ export default function NewProjectPage() {
               />
               <p className="mt-2 text-[12px] text-text-muted">
                 Public repositories work immediately. For private repositories, install the Provenance GitHub App on the repository first.
+              </p>
+            </div>
+
+            <div>
+              <label
+                htmlFor="history_window"
+                className="block text-[12px] font-medium uppercase tracking-wider text-text-muted mb-1.5"
+              >
+                History window
+              </label>
+              <select
+                id="history_window"
+                value={historyWindow}
+                onChange={(e) => setHistoryWindow(e.target.value)}
+                className="w-full h-[36px] px-3 font-mono text-[13px] bg-surface border border-border rounded-[4px] text-text focus:outline-none focus:border-border-strong"
+              >
+                <option value="all">All history (full project timeline)</option>
+                <option value="12m">Last 12 months</option>
+                <option value="6m">Last 6 months</option>
+              </select>
+              <p className="mt-2 text-[12px] text-text-muted">
+                Limit the commit history read and analyzed to focus on recent contributions and speed up processing.
               </p>
             </div>
 

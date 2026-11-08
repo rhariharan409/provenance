@@ -116,3 +116,4 @@ def update_user_role(
         "role": target_user.role.value if hasattr(target_user.role, "value") else str(target_user.role),
         "created_at": target_user.created_at.isoformat() if target_user.created_at else None,
     }
+

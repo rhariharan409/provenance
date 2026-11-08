@@ -60,3 +60,4 @@ class MemberSummary(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "member_id", name="uq_member_summary_run_member"),
     )
+

@@ -422,6 +422,31 @@ def test_rule_based_summary_generation_and_citations():
     assert citations[0]["sha"] == "a1b2c3d4e5f60000111122223333444455556666"
 
 
+def test_rule_based_summary_singular_plurals():
+    """
+    Assert singular wording: 1 commit, 1 active day, 1 pull request, 1 peer review.
+    """
+    facts = {
+        "counted_commits": 1,
+        "active_days": 1,
+        "top_files": [{"path": "src/main.py", "lines": 50}],
+        "top_commits": [
+            {
+                "sha": "a1b2c3d4e5f60000111122223333444455556666",
+                "sha_short": "a1b2c3d",
+                "subject": "Initial commit",
+                "additions": 50,
+            },
+        ],
+        "pull_requests_opened": 1,
+        "reviews_given": 1,
+    }
+    text, method, citations = generate_rule_based_summary(facts)
+    assert method == SummaryMethod.rule_based
+    assert "Counted 1 commit across 1 active day." in text
+    assert "Recorded 1 pull request opened and 1 peer review completed." in text
+
+
 def test_llm_hallucinated_citation_fallback():
     """
     If LLM returns a citation not present in the facts bundle,
@@ -508,6 +533,75 @@ def test_summary_api_generation_fallback_on_llm_failure(db_session, test_user):
     summaries = get_resp.json()
     assert len(summaries) >= 1
     assert summaries[0]["method"] == "rule_based"
+
+
+def test_get_project_summaries_all_cases(db_session, test_user):
+    """
+    Test GET /projects/{id}/summaries for:
+      - no-run case (returns 200 with empty list and needs_analysis=True)
+      - empty case (complete run exists, but no summaries yet; returns [])
+      - populated case (complete run exists and summaries present; returns summaries)
+    """
+    project = Project(
+        owner_id=test_user.id,
+        name="Summaries Test Repo",
+        repo_full_name="testuser/summaries-test-repo",
+        repo_url="https://github.com/testuser/summaries-test-repo",
+        status=ProjectStatus.ready,
+    )
+    db_session.add(project)
+    db_session.commit()
+
+    client = make_client_for_user(test_user, db_session)
+
+    # 1. No-run case: no complete analysis run exists
+    res_no_run = client.get(f"/projects/{project.id}/summaries")
+    assert res_no_run.status_code == 200
+    data_no_run = res_no_run.json()
+    assert data_no_run.get("needs_analysis") is True
+    assert data_no_run.get("summaries") == []
+
+    # 2. Empty case: complete run exists, but no summaries generated yet
+    run = AnalysisRun(
+        project_id=project.id,
+        head_sha="0123456789abcdef0123456789abcdef01234567",
+        status=AnalysisRunStatus.complete,
+        weights={"survival": 0.4, "effective_change": 0.25, "ownership": 0.15, "collaboration": 0.2},
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    res_empty = client.get(f"/projects/{project.id}/summaries")
+    assert res_empty.status_code == 200
+    data_empty = res_empty.json()
+    assert data_empty == []
+
+    # 3. Populated case: complete run with MemberSummary records
+    member = Member(
+        project_id=project.id,
+        github_login="contributor1",
+        display_name="Contributor One",
+    )
+    db_session.add(member)
+    db_session.commit()
+
+    summary = MemberSummary(
+        run_id=run.id,
+        member_id=member.id,
+        text="Counted 3 commits across 1 active day.",
+        method=SummaryMethod.rule_based,
+        citations=[],
+    )
+    db_session.add(summary)
+    db_session.commit()
+
+    res_populated = client.get(f"/projects/{project.id}/summaries")
+    assert res_populated.status_code == 200
+    data_populated = res_populated.json()
+    assert len(data_populated) == 1
+    assert data_populated[0]["member_name"] == "Contributor One"
+    assert data_populated[0]["text"] == "Counted 3 commits across 1 active day."
+    assert data_populated[0]["method"] == "rule_based"
 
 
 # =========================================================================

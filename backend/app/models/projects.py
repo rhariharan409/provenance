@@ -1,8 +1,9 @@
 import enum
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, Text, Uuid, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
@@ -64,6 +65,13 @@ class Project(Base):
     # Section 3 columns
     analysis_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Section 7 columns: performance, history window, progress & timings
+    history_window: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    history_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    progress_step: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    progress_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    timing_stats: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
 
     owner = relationship("User", backref="projects")
 

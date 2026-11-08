@@ -32,18 +32,9 @@ def _check_project_access(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     if user.role == UserRole.admin or project.owner_id == user.id:
         return project
-    if not write and user.role == UserRole.faculty and db is not None:
-        from app.models.faculty import ProjectFaculty
-        is_assigned = (
-            db.query(ProjectFaculty)
-            .filter(
-                ProjectFaculty.project_id == project.id,
-                ProjectFaculty.faculty_user_id == user.id,
-            )
-            .first()
-            is not None
-        )
-        if is_assigned:
+    if not write and db is not None:
+        from app.services.auth_access import is_reviewer_on_project
+        if is_reviewer_on_project(project.id, user, db):
             return project
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
@@ -51,6 +42,8 @@ def _check_project_access(
 class AnalysisStatusResponse(BaseModel):
     analysis_status: str
     analysis_error: Optional[str] = None
+    progress_step: Optional[str] = None
+    progress_percent: Optional[int] = None
 
 
 class MemberScoreItem(BaseModel):
@@ -73,6 +66,9 @@ class ProjectScoresResponse(BaseModel):
     stats: Dict[str, Any]
     project_flags: List[Dict[str, str]]
     members: List[MemberScoreItem]
+    history_window: Optional[str] = None
+    history_since: Optional[str] = None
+    timing_stats: Optional[Dict[str, Any]] = None
 
 
 class MemberEvidenceResponse(BaseModel):
@@ -127,6 +123,8 @@ def get_analysis_status(
     return AnalysisStatusResponse(
         analysis_status=project.analysis_status or "pending",
         analysis_error=project.analysis_error,
+        progress_step=project.progress_step,
+        progress_percent=project.progress_percent,
     )
 
 
@@ -198,6 +196,9 @@ def get_project_scores(
         stats=stats,
         project_flags=p_flags_formatted,
         members=member_items,
+        history_window=project.history_window,
+        history_since=project.history_since.isoformat() if project.history_since else None,
+        timing_stats=project.timing_stats,
     )
 
 

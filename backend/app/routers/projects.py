@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import shutil
 from typing import List, Optional
@@ -29,6 +29,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     repo_url: str = Field(..., description="GitHub repository URL")
+    history_window: Optional[str] = Field("all", description="Commit history window: all, 12m, 6m")
 
 
 class AssignAliasRequest(BaseModel):
@@ -58,18 +59,9 @@ def check_project_access(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     if user.role == UserRole.admin or project.owner_id == user.id:
         return project
-    if not write and user.role == UserRole.faculty and db is not None:
-        from app.models.faculty import ProjectFaculty
-        is_assigned = (
-            db.query(ProjectFaculty)
-            .filter(
-                ProjectFaculty.project_id == project.id,
-                ProjectFaculty.faculty_user_id == user.id,
-            )
-            .first()
-            is not None
-        )
-        if is_assigned:
+    if not write and db is not None:
+        from app.services.auth_access import is_reviewer_on_project
+        if is_reviewer_on_project(project.id, user, db):
             return project
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
@@ -135,6 +127,17 @@ def create_project(
 
     repo_full_name = f"{owner}/{repo}"
 
+    # Calculate history window & since timestamp
+    hist_window = payload.history_window or "all"
+    hist_since = None
+    now_utc = datetime.now(timezone.utc)
+    if hist_window == "12m":
+        hist_since = now_utc - timedelta(days=365)
+    elif hist_window == "6m":
+        hist_since = now_utc - timedelta(days=180)
+    else:
+        hist_window = "all"
+
     # Check if this owner already added this repo
     existing = db.query(Project).filter(
         Project.owner_id == current_user.id,
@@ -150,6 +153,8 @@ def create_project(
         project = existing
         project.status = ProjectStatus.pending
         project.error_message = None
+        project.history_window = hist_window
+        project.history_since = hist_since
     else:
         project = Project(
             owner_id=current_user.id,
@@ -161,7 +166,9 @@ def create_project(
             github_repo=repo,
             default_branch=meta.get("default_branch") or "main",
             is_private=bool(meta.get("private", False)),
-            status=ProjectStatus.pending
+            status=ProjectStatus.pending,
+            history_window=hist_window,
+            history_since=hist_since,
         )
         db.add(project)
 
@@ -244,6 +251,11 @@ def get_project_detail(
         "last_collected_at": project.last_collected_at.isoformat() if project.last_collected_at else None,
         "members_count": members_count,
         "prs_count": prs_count,
+        "history_window": project.history_window,
+        "history_since": project.history_since.isoformat() if project.history_since else None,
+        "progress_step": project.progress_step,
+        "progress_percent": project.progress_percent,
+        "timing_stats": project.timing_stats,
     }
 
 

@@ -116,10 +116,12 @@ def generate_rule_based_summary(facts: Dict[str, Any]) -> Tuple[str, SummaryMeth
     # Sentence 1: Activity
     commits = facts.get("counted_commits", 0)
     days = facts.get("active_days", 0)
+    commits_word = "1 commit" if commits == 1 else f"{commits} commits"
+    days_word = "1 active day" if days == 1 else f"{days} active days"
     if days > 0:
-        sentences.append(f"Counted {commits} commits across {days} active days.")
+        sentences.append(f"Counted {commits_word} across {days_word}.")
     else:
-        sentences.append(f"Counted {commits} commits in the repository history.")
+        sentences.append(f"Counted {commits_word} in the repository history.")
 
     # Sentence 2: Files changed
     top_files = facts.get("top_files", [])
@@ -153,7 +155,9 @@ def generate_rule_based_summary(facts: Dict[str, Any]) -> Tuple[str, SummaryMeth
     prs = facts.get("pull_requests_opened", 0)
     reviews = facts.get("reviews_given", 0)
     if prs > 0 or reviews > 0:
-        sentences.append(f"Recorded {prs} pull request(s) opened and {reviews} peer review(s) completed.")
+        prs_word = "1 pull request" if prs == 1 else f"{prs} pull requests"
+        reviews_word = "1 peer review" if reviews == 1 else f"{reviews} peer reviews"
+        sentences.append(f"Recorded {prs_word} opened and {reviews_word} completed.")
 
     # Guarantee 3 to 5 sentences
     text = " ".join(sentences)

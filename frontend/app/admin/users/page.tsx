@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getCurrentUser, getAdminUsers, updateUserRole, AdminUserItem, UserProfile } from "@/lib/api";
+import { formatDate, formatDateTime } from "@/lib/date";
 
 export default function AdminUsersPage() {
   const router = useRouter();
@@ -24,10 +25,11 @@ export default function AdminUsersPage() {
     setError(null);
     try {
       const res = await getAdminUsers(query);
-      setUsers(res.users);
-      setTotal(res.total);
+      const safeUsers = Array.isArray(res?.users) ? res.users : [];
+      setUsers(safeUsers);
+      setTotal(res?.total ?? safeUsers.length);
       const rolesMap: Record<string, "student" | "faculty" | "admin"> = {};
-      res.users.forEach((u) => {
+      safeUsers.forEach((u) => {
         rolesMap[u.id] = u.role;
       });
       setSelectedRoles(rolesMap);
@@ -252,12 +254,8 @@ export default function AdminUsersPage() {
                     const currentSelectedRole = selectedRoles[u.id] || u.role;
                     const hasChanged = currentSelectedRole !== u.role;
                     const isSaving = savingUserId === u.id;
-                    const lastLoginStr = u.last_login_at
-                      ? new Date(u.last_login_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
-                      : "—";
-                    const createdStr = u.created_at
-                      ? new Date(u.created_at).toISOString().split("T")[0]
-                      : "—";
+                    const lastLoginStr = formatDateTime(u.last_login_at);
+                    const createdStr = formatDate(u.created_at);
 
                     return (
                       <tr key={u.id} className="hover:bg-bg/40 transition-colors">

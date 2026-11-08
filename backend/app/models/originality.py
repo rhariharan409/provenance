@@ -102,3 +102,4 @@ class OriginalityMatch(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "other_project_id", name="uq_originality_run_other_project"),
     )
+

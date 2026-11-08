@@ -17,6 +17,7 @@ from app.models.faculty import ProjectFaculty
 from app.models.members import Member
 from app.models.projects import Project
 from app.models.users import User, UserRole
+from app.services.auth_access import is_reviewer_on_project
 
 logger = logging.getLogger(__name__)
 
@@ -146,19 +147,10 @@ def list_disputes(
 
     is_admin = current_user.role == UserRole.admin
     is_owner = project.owner_id == current_user.id
-    is_assigned_faculty = (
-        current_user.role == UserRole.faculty
-        and db.query(ProjectFaculty)
-        .filter(
-            ProjectFaculty.project_id == id,
-            ProjectFaculty.faculty_user_id == current_user.id,
-        )
-        .first()
-        is not None
-    )
+    is_reviewer = is_reviewer_on_project(project, current_user, db)
 
     query = db.query(Dispute).filter(Dispute.project_id == id)
-    if not (is_admin or is_owner or is_assigned_faculty):
+    if not (is_admin or is_owner or is_reviewer):
         # Regular users only see disputes they raised
         query = query.filter(Dispute.raised_by == current_user.id)
 
@@ -206,18 +198,9 @@ def resolve_dispute(
 
     is_admin = current_user.role == UserRole.admin
     is_owner = project.owner_id == current_user.id
-    is_assigned_faculty = (
-        current_user.role == UserRole.faculty
-        and db.query(ProjectFaculty)
-        .filter(
-            ProjectFaculty.project_id == id,
-            ProjectFaculty.faculty_user_id == current_user.id,
-        )
-        .first()
-        is not None
-    )
+    is_reviewer = is_reviewer_on_project(project, current_user, db)
 
-    if not (is_admin or is_owner or is_assigned_faculty):
+    if not (is_admin or is_owner or is_reviewer):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
     dispute = db.query(Dispute).filter(Dispute.id == dispute_id, Dispute.project_id == id).first()

@@ -13,6 +13,7 @@ from app.models.disputes import Dispute, DisputeStatus
 from app.models.faculty import ProjectFaculty
 from app.models.summaries import MemberSummary, SummaryMethod
 from app.models.originality import Fingerprint, OriginalityMatch
+from app.models.review_invitations import ReviewInvitation, InvitationStatus
 
 __all__ = [
     "Base",
@@ -39,4 +40,6 @@ __all__ = [
     "SummaryMethod",
     "Fingerprint",
     "OriginalityMatch",
+    "ReviewInvitation",
+    "InvitationStatus",
 ]

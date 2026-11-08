@@ -44,3 +44,4 @@ class ProjectFaculty(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "faculty_user_id", name="uq_project_faculty"),
     )
+

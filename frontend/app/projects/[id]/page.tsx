@@ -3,46 +3,42 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import Image from "next/image";
 import {
   ProjectDetail,
   MemberDetail,
   UnlinkedAlias,
   CommitItem,
   ProjectScoresResponse,
-  MemberEvidenceResponse,
   UserProfile,
   DisputeItem,
+  ProjectReviewerItem,
+  MemberSummaryItem,
+  OriginalityResponse,
   getProjectDetail,
   getProjectMembers,
   getProjectUnlinkedAliases,
   getProjectCommits,
   recollectProject,
   deleteProject,
-  assignAlias,
-  mergeMembers,
   getProjectScores,
-  getMemberEvidence,
   getAnalysisStatus,
-  triggerAnalysis,
   getCurrentUserClient,
-  publishPassport,
   getMyPassports,
-  createDispute,
   listDisputes,
-  resolveDispute,
-  ProjectFacultyItem,
-  MemberSummaryItem,
-  OriginalityResponse,
-  getProjectFaculty,
-  assignProjectFaculty,
-  removeProjectFaculty,
+  getProjectReviewers,
   getProjectSummaries,
-  generateProjectSummaries,
   getOriginalityMatches,
-  runOriginalityCheck,
-  getExportCsvUrl,
 } from "@/lib/api";
+import ProjectHeader from "@/components/ProjectHeader";
+import ScoresTable from "@/components/ScoresTable";
+import MembersTable from "@/components/MembersTable";
+import UnlinkedIdentities from "@/components/UnlinkedIdentities";
+import RecentCommits from "@/components/RecentCommits";
+import DisputesPanel from "@/components/DisputesPanel";
+import CollapsiblePanel from "@/components/CollapsiblePanel";
+import ReviewersPanel from "@/components/ReviewersPanel";
+import SummariesPanel from "@/components/SummariesPanel";
+import OriginalityPanel from "@/components/OriginalityPanel";
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -57,57 +53,38 @@ export default function ProjectDetailPage() {
   const [scores, setScores] = useState<ProjectScoresResponse | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<string>("pending");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [expandedMember, setExpandedMember] = useState<string | null>(null);
-  const [memberEvidences, setMemberEvidences] = useState<Record<string, MemberEvidenceResponse>>({});
-  const [evidenceLoading, setEvidenceLoading] = useState<Record<string, boolean>>({});
+  const [progressStep, setProgressStep] = useState<string | null>(null);
+  const [progressPercent, setProgressPercent] = useState<number | null>(null);
 
   // Passport state
   const [passportData, setPassportData] = useState<Record<string, { code: string; url: string }>>({});
-  const [passportLoading, setPassportLoading] = useState<Record<string, boolean>>({});
-  const [passportError, setPassportError] = useState<Record<string, string>>({});
-  const [passportCopied, setPassportCopied] = useState<Record<string, boolean>>({});
 
-  // Dispute state
-  const [disputingMemberId, setDisputingMemberId] = useState<string | null>(null);
-  const [disputeText, setDisputeText] = useState("");
-  const [disputeSubmitting, setDisputeSubmitting] = useState(false);
-  const [disputeError, setDisputeError] = useState<string | null>(null);
-  const [disputeSuccess, setDisputeSuccess] = useState<string | null>(null);
-
-  // Disputes list (for owner/faculty/admin)
+  // Disputes list
   const [disputes, setDisputes] = useState<DisputeItem[]>([]);
-  const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
-  const [disputeNotice, setDisputeNotice] = useState<string | null>(null);
 
-  // Section 5: Faculty Assignment state
-  const [facultyList, setFacultyList] = useState<ProjectFacultyItem[]>([]);
-  const [facultyInput, setFacultyInput] = useState("");
-  const [addingFaculty, setAddingFaculty] = useState(false);
-  const [facultyError, setFacultyError] = useState<string | null>(null);
+  // Reviewers list
+  const [reviewersList, setReviewersList] = useState<ProjectReviewerItem[]>([]);
 
-  // Section 5: Summaries state
+  // Summaries
   const [summaries, setSummaries] = useState<MemberSummaryItem[]>([]);
-  const [generatingSummaries, setGeneratingSummaries] = useState(false);
-  const [summariesError, setSummariesError] = useState<string | null>(null);
 
-  // Section 5: Originality state
+  // Originality
   const [originalityResponse, setOriginalityResponse] = useState<OriginalityResponse | null>(null);
-  const [runningOriginality, setRunningOriginality] = useState(false);
-  const [originalityError, setOriginalityError] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Assignment & Merge state
-  const [selectedMemberForAlias, setSelectedMemberForAlias] = useState<Record<string, string>>({});
-  const [mergeSource, setMergeSource] = useState("");
-  const [mergeTarget, setMergeTarget] = useState("");
-  const [confirmMerge, setConfirmMerge] = useState(false);
-
   const isOwnerOrAdmin = Boolean(currentUser && project && (project.owner_id === currentUser.id || currentUser.role === "admin"));
-  const isAssignedFaculty = Boolean(currentUser && currentUser.role === "faculty" && facultyList.some((f) => f.user_id === currentUser.id));
+  const isAssignedFaculty = Boolean(
+    currentUser &&
+      (currentUser.role === "faculty" ||
+        reviewersList.some(
+          (f) =>
+            f.status === "accepted" &&
+            ("user_id" in f ? (f as { user_id?: string }).user_id === currentUser.id : f.invitee_username.toLowerCase() === currentUser.username.toLowerCase())
+        ))
+  );
   const canExport = isOwnerOrAdmin || isAssignedFaculty;
 
   const loadData = useCallback(async () => {
@@ -124,9 +101,11 @@ export default function ProjectDetailPage() {
       return;
     }
     setProject(proj);
+    if (proj.progress_step !== undefined) setProgressStep(proj.progress_step);
+    if (proj.progress_percent !== undefined) setProgressPercent(proj.progress_percent);
 
     if (proj.status === "ready") {
-      const [mems, aliases, cms, statusRes, scoreRes, dispList, myPassports, facList, sums, orig] = await Promise.all([
+      const [mems, aliases, cms, statusRes, scoreRes, dispList, myPassports, revList, sums, orig] = await Promise.all([
         getProjectMembers(id),
         getProjectUnlinkedAliases(id),
         getProjectCommits(id, 50, 0),
@@ -134,18 +113,19 @@ export default function ProjectDetailPage() {
         getProjectScores(id),
         listDisputes(id),
         getMyPassports(),
-        getProjectFaculty(id),
+        getProjectReviewers(id),
         getProjectSummaries(id),
         getOriginalityMatches(id),
       ]);
-      setMembers(mems);
-      setUnlinkedAliases(aliases);
-      setCommits(cms);
-      setDisputes(dispList);
-      setFacultyList(facList);
-      setSummaries(sums);
+      setMembers(Array.isArray(mems) ? mems : []);
+      setUnlinkedAliases(Array.isArray(aliases) ? aliases : []);
+      setCommits(Array.isArray(cms) ? cms : []);
+      setDisputes(Array.isArray(dispList) ? dispList : []);
+      setReviewersList(Array.isArray(revList) ? revList : []);
+      setSummaries(Array.isArray(sums) ? sums : []);
       setOriginalityResponse(orig);
-      if (myPassports && myPassports.length > 0) {
+
+      if (Array.isArray(myPassports) && myPassports.length > 0) {
         const initialPassports: Record<string, { code: string; url: string }> = {};
         for (const p of myPassports) {
           if (p.project_id === id && p.status === "active" && p.member_id) {
@@ -157,6 +137,8 @@ export default function ProjectDetailPage() {
       if (statusRes) {
         setAnalysisStatus(statusRes.analysis_status);
         setAnalysisError(statusRes.analysis_error);
+        if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
+        if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
       }
       if (scoreRes) {
         setScores(scoreRes);
@@ -165,168 +147,11 @@ export default function ProjectDetailPage() {
     setLoading(false);
   }, [id, router]);
 
-  const handlePublish = async (memberId: string) => {
-    setPassportLoading((prev) => ({ ...prev, [memberId]: true }));
-    setPassportError((prev) => ({ ...prev, [memberId]: "" }));
-    try {
-      const res = await publishPassport(id, memberId);
-      if (res.ok && res.code && res.url) {
-        setPassportData((prev) => ({
-          ...prev,
-          [memberId]: { code: res.code!, url: res.url! },
-        }));
-      } else if (res.status === 503) {
-        setPassportError((prev) => ({
-          ...prev,
-          [memberId]: "Passport signing is not configured on this server.",
-        }));
-      } else {
-        setPassportError((prev) => ({
-          ...prev,
-          [memberId]: res.error || "Failed to publish passport.",
-        }));
-      }
-    } catch {
-      setPassportError((prev) => ({
-        ...prev,
-        [memberId]: "An unexpected error occurred.",
-      }));
-    } finally {
-      setPassportLoading((prev) => ({ ...prev, [memberId]: false }));
-    }
-  };
-
-  const handleCopyPassport = (memberId: string, code: string) => {
-    const url = `${window.location.origin}/p/${code}`;
-    navigator.clipboard.writeText(url);
-    setPassportCopied((prev) => ({ ...prev, [memberId]: true }));
-    setTimeout(() => {
-      setPassportCopied((prev) => ({ ...prev, [memberId]: false }));
-    }, 2000);
-  };
-
-  const handleSubmitDispute = async (memberId: string) => {
-    if (!disputeText.trim()) return;
-    setDisputeSubmitting(true);
-    setDisputeError(null);
-    setDisputeSuccess(null);
-    try {
-      const res = await createDispute(id, memberId, disputeText);
-      if (res.ok) {
-        setDisputeSuccess("Dispute submitted successfully.");
-        setDisputeText("");
-        const updatedDisputes = await listDisputes(id);
-        setDisputes(updatedDisputes);
-        setTimeout(() => {
-          setDisputingMemberId(null);
-          setDisputeSuccess(null);
-        }, 1500);
-      } else {
-        setDisputeError(res.error || "Failed to submit dispute.");
-      }
-    } catch {
-      setDisputeError("Failed to submit dispute. Please try again.");
-    } finally {
-      setDisputeSubmitting(false);
-    }
-  };
-
-  const handleResolveDispute = async (disputeId: string, newStatus: "resolved" | "rejected") => {
-    setResolvingId(disputeId);
-    setDisputeNotice(null);
-    try {
-      const res = await resolveDispute(id, disputeId, newStatus, resolutionNotes[disputeId]);
-      if (res.ok) {
-        setDisputeNotice(res.message || "Dispute updated. Re-running repository analysis may be needed to adjust contribution scores.");
-        const updatedDisputes = await listDisputes(id);
-        setDisputes(updatedDisputes);
-      } else {
-        setDisputeNotice(res.error || "Failed to update dispute.");
-      }
-    } catch {
-      setDisputeNotice("Failed to update dispute.");
-    } finally {
-      setResolvingId(null);
-    }
-  };
-
-  // Section 5 Handlers
-  const handleAddFaculty = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!facultyInput.trim() || addingFaculty) return;
-    setAddingFaculty(true);
-    setFacultyError(null);
-    try {
-      const res = await assignProjectFaculty(id, facultyInput.trim());
-      if (res.ok) {
-        setFacultyInput("");
-        const updated = await getProjectFaculty(id);
-        setFacultyList(updated);
-      } else {
-        setFacultyError(res.error || "Failed to assign faculty.");
-      }
-    } catch {
-      setFacultyError("Failed to assign faculty.");
-    } finally {
-      setAddingFaculty(false);
-    }
-  };
-
-  const handleRemoveFaculty = async (userId: string) => {
-    try {
-      const res = await removeProjectFaculty(id, userId);
-      if (res.ok) {
-        setFacultyList((prev) => prev.filter((f) => f.user_id !== userId));
-      } else {
-        setFacultyError(res.error || "Failed to remove faculty.");
-      }
-    } catch {
-      setFacultyError("Failed to remove faculty.");
-    }
-  };
-
-  const handleGenerateSummaries = async () => {
-    setGeneratingSummaries(true);
-    setSummariesError(null);
-    try {
-      const res = await generateProjectSummaries(id);
-      if (res.ok) {
-        const updated = await getProjectSummaries(id);
-        setSummaries(updated);
-      } else {
-        setSummariesError(res.error || "Failed to generate summaries.");
-      }
-    } catch {
-      setSummariesError("Failed to generate summaries.");
-    } finally {
-      setGeneratingSummaries(false);
-    }
-  };
-
-  const handleRunOriginality = async () => {
-    setRunningOriginality(true);
-    setOriginalityError(null);
-    try {
-      const res = await runOriginalityCheck(id);
-      if (res.ok) {
-        const updated = await getOriginalityMatches(id);
-        setOriginalityResponse(updated);
-      } else {
-        setOriginalityError(res.error || "Failed to run originality check.");
-      }
-    } catch {
-      setOriginalityError("Failed to run originality check.");
-    } finally {
-      setRunningOriginality(false);
-    }
-  };
-
   useEffect(() => {
     async function fetchData() {
       if (!id) return;
       await loadData();
     }
-
     void fetchData();
   }, [id, loadData]);
 
@@ -344,6 +169,8 @@ export default function ProjectDetailPage() {
         const updated = await getProjectDetail(id);
         if (updated) {
           setProject(updated);
+          if (updated.progress_step !== undefined) setProgressStep(updated.progress_step);
+          if (updated.progress_percent !== undefined) setProgressPercent(updated.progress_percent);
           if (updated.status === "ready") {
             const [mems, aliases, cms, statusRes, scoreRes] = await Promise.all([
               getProjectMembers(id),
@@ -352,12 +179,14 @@ export default function ProjectDetailPage() {
               getAnalysisStatus(id),
               getProjectScores(id),
             ]);
-            setMembers(mems);
-            setUnlinkedAliases(aliases);
-            setCommits(cms);
+            setMembers(Array.isArray(mems) ? mems : []);
+            setUnlinkedAliases(Array.isArray(aliases) ? aliases : []);
+            setCommits(Array.isArray(cms) ? cms : []);
             if (statusRes) {
               setAnalysisStatus(statusRes.analysis_status);
               setAnalysisError(statusRes.analysis_error);
+              if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
+              if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
             }
             if (scoreRes) {
               setScores(scoreRes);
@@ -369,6 +198,8 @@ export default function ProjectDetailPage() {
         if (statusRes) {
           setAnalysisStatus(statusRes.analysis_status);
           setAnalysisError(statusRes.analysis_error);
+          if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
+          if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
           if (statusRes.analysis_status === "complete") {
             const scoreRes = await getProjectScores(id);
             if (scoreRes) {
@@ -390,30 +221,6 @@ export default function ProjectDetailPage() {
     setActionLoading(false);
   };
 
-  const handleReanalyze = async () => {
-    if (actionLoading || analysisStatus === "running") return;
-    setActionLoading(true);
-    setAnalysisStatus("running");
-    await triggerAnalysis(id);
-    setActionLoading(false);
-  };
-
-  const toggleExpandMember = async (memberId: string) => {
-    if (expandedMember === memberId) {
-      setExpandedMember(null);
-      return;
-    }
-    setExpandedMember(memberId);
-    if (!memberEvidences[memberId]) {
-      setEvidenceLoading((prev) => ({ ...prev, [memberId]: true }));
-      const ev = await getMemberEvidence(id, memberId);
-      if (ev) {
-        setMemberEvidences((prev) => ({ ...prev, [memberId]: ev }));
-      }
-      setEvidenceLoading((prev) => ({ ...prev, [memberId]: false }));
-    }
-  };
-
   const handleDelete = async () => {
     if (!confirmDelete) {
       setConfirmDelete(true);
@@ -429,31 +236,32 @@ export default function ProjectDetailPage() {
     }
   };
 
-  const handleAssign = async (aliasId: string) => {
-    const targetMemberId = selectedMemberForAlias[aliasId];
-    if (!targetMemberId) return;
-    setActionLoading(true);
-    await assignAlias(id, aliasId, targetMemberId);
-    await loadData();
-    setActionLoading(false);
+  const handlePassportPublished = (memberId: string, code: string, url: string) => {
+    setPassportData((prev) => ({
+      ...prev,
+      [memberId]: { code, url },
+    }));
   };
 
-  const handleMerge = async () => {
-    if (!mergeSource || !mergeTarget || mergeSource === mergeTarget) return;
-    if (!confirmMerge) {
-      setConfirmMerge(true);
-      return;
-    }
-    setActionLoading(true);
-    await mergeMembers(id, mergeSource, targetMemberIdClean(mergeTarget));
-    setMergeSource("");
-    setMergeTarget("");
-    setConfirmMerge(false);
-    await loadData();
-    setActionLoading(false);
+  const handleRefreshDisputes = async () => {
+    const updated = await listDisputes(id);
+    setDisputes(Array.isArray(updated) ? updated : []);
   };
 
-  const targetMemberIdClean = (val: string) => val;
+  const handleRefreshReviewers = async () => {
+    const updated = await getProjectReviewers(id);
+    setReviewersList(Array.isArray(updated) ? updated : []);
+  };
+
+  const handleRefreshSummaries = async () => {
+    const updated = await getProjectSummaries(id);
+    setSummaries(Array.isArray(updated) ? updated : []);
+  };
+
+  const handleRefreshOriginality = async () => {
+    const updated = await getOriginalityMatches(id);
+    setOriginalityResponse(updated);
+  };
 
   if (loading || !project) {
     return (
@@ -472,9 +280,26 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const lastCollectedStr = project.last_collected_at
-    ? new Date(project.last_collected_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
-    : "—";
+  // Collapsed header status text calculations
+  const reviewersCount = reviewersList.length;
+  const reviewersStatusText =
+    reviewersCount === 0
+      ? "No reviewers"
+      : reviewersCount === 1
+      ? "1 reviewer"
+      : `${reviewersCount} reviewers`;
+
+  const summariesStatusText =
+    summaries.length > 0 ? "Generated" : "Not generated";
+
+  const matchesCount = originalityResponse?.matches?.length ?? 0;
+  const originalityStatusText = !originalityResponse
+    ? "Not run"
+    : matchesCount === 0
+    ? "No similarities found"
+    : matchesCount === 1
+    ? "1 match"
+    : `${matchesCount} matches`;
 
   return (
     <div className="min-h-full flex flex-col bg-bg">
@@ -483,81 +308,41 @@ export default function ProjectDetailPage() {
           <Link href="/dashboard" className="font-serif text-[18px] font-semibold text-text tracking-tight">
             Provenance
           </Link>
-          <Link href="/dashboard" className="text-sm text-text-muted hover:text-text">
-            Back to dashboard
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link href="/dashboard" className="text-xs text-text-muted hover:text-text">
+              &larr; Back to dashboard
+            </Link>
+          </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-[1120px] w-full mx-auto px-4 py-8 space-y-6">
-        {/* Project Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-border">
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="font-mono text-[20px] font-semibold text-text tracking-tight">
-                {project.repo_full_name}
-              </h1>
-              <span className="font-mono text-[12px] border border-border px-2 py-0.5 rounded-[4px] bg-surface capitalize text-text">
-                {project.status}
-              </span>
-              {project.is_private && (
-                <span className="text-[11px] font-mono border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted">
-                  private
-                </span>
-              )}
-            </div>
-            {project.description && (
-              <p className="text-[13px] text-text-muted mt-1">{project.description}</p>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {canExport && (
-              <a
-                href={getExportCsvUrl(id)}
-                className="btn-secondary text-[13px]"
-                download={`provenance-${project.repo_full_name.replace("/", "-")}.csv`}
-              >
-                Export CSV
-              </a>
-            )}
-            {isOwnerOrAdmin && (
-              <>
-                <button
-                  type="button"
-                  onClick={handleRecollect}
-                  disabled={actionLoading || project.status === "analyzing"}
-                  className="btn-secondary text-[13px]"
-                >
-                  Re-run collection
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDelete}
-                  disabled={actionLoading}
-                  className={`btn-secondary text-[13px] ${confirmDelete ? "border-danger text-danger" : ""}`}
-                >
-                  {confirmDelete ? "Confirm delete" : "Delete project"}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Warnings notice block */}
-        {project.warnings && (
-          <div className="bg-surface border border-warning rounded-[4px] p-3 text-[13px] text-text">
-            <span className="font-medium text-warning mr-1">Notice:</span>
-            {project.warnings}
-          </div>
-        )}
+      <main className="flex-1 max-w-[1120px] w-full mx-auto px-4 py-8 space-y-8">
+        {/* a. Header & b. Summary Line */}
+        <ProjectHeader
+          project={project}
+          membersCount={members.length}
+          isOwnerOrAdmin={isOwnerOrAdmin}
+          canExport={canExport}
+          actionLoading={actionLoading}
+          confirmDelete={confirmDelete}
+          onRecollect={handleRecollect}
+          onDelete={handleDelete}
+        />
 
         {/* Pending / Analyzing State */}
         {(project.status === "pending" || project.status === "analyzing") && (
-          <div className="bg-surface border border-border rounded-[6px] p-8 text-center">
-            <p className="text-text font-medium text-[15px] mb-2">
-              Collecting repository history...
+          <div className="bg-surface border border-border rounded-[6px] p-8 text-center space-y-3">
+            <p className="text-text font-medium text-[15px]">
+              {progressStep || "Collecting repository history..."}
             </p>
+            {typeof progressPercent === "number" && (
+              <div className="max-w-[360px] mx-auto w-full bg-border rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-accent h-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, Math.max(5, progressPercent))}%` }}
+                />
+              </div>
+            )}
             <p className="text-text-muted text-[13px]">
               Cloning repository history and mapping author identities. This page will update automatically.
             </p>
@@ -585,1153 +370,107 @@ export default function ProjectDetailPage() {
         {/* Ready State */}
         {project.status === "ready" && (
           <>
-            {/* 1) Summary Line */}
-            <div className="bg-surface border border-border rounded-[6px] px-4 py-3 text-[13px] text-text font-mono flex flex-wrap gap-4 items-center">
-              <span>
-                <strong className="font-semibold text-text">{project.commit_total.toLocaleString()}</strong> commits
-              </span>
-              <span className="text-border-strong">•</span>
-              <span>
-                <strong className="font-semibold text-text">{members.length}</strong> members
-              </span>
-              <span className="text-border-strong">•</span>
-              <span>
-                <strong className="font-semibold text-text">{project.prs_count}</strong> pull requests
-              </span>
-              <span className="text-border-strong">•</span>
-              <span className="text-text-muted">
-                Last collected: <span className="tabular-nums text-text">{lastCollectedStr}</span>
-              </span>
-            </div>
+            {/* c. Contribution Scores */}
+            <ScoresTable
+              projectId={id}
+              scores={scores}
+              analysisStatus={analysisStatus}
+              analysisError={analysisError}
+              progressStep={progressStep}
+              progressPercent={progressPercent}
+              members={members}
+              currentUser={currentUser}
+              isOwnerOrAdmin={isOwnerOrAdmin}
+              passportData={passportData}
+              onAnalysisTriggered={() => {
+                setAnalysisStatus("running");
+                setProgressStep("Starting analysis...");
+                setProgressPercent(70);
+              }}
+              onPassportPublished={handlePassportPublished}
+              onDisputeSubmitted={handleRefreshDisputes}
+            />
 
-            {/* 1.5) Contribution Scores Section */}
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                  Contribution Scores
-                </h2>
-                {analysisStatus !== "running" && (
-                  <button
-                    type="button"
-                    onClick={handleReanalyze}
-                    disabled={actionLoading}
-                    className="btn-secondary text-[12px] h-[30px] px-2.5"
-                  >
-                    Re-run analysis
-                  </button>
-                )}
-              </div>
+            {/* d. Members */}
+            <MembersTable
+              projectId={id}
+              members={members}
+              onDataChanged={loadData}
+              readOnly={!isOwnerOrAdmin}
+            />
 
-              {/* While analysis is running */}
-              {analysisStatus === "running" && (
-                <div className="bg-surface border border-border rounded-[6px] p-6 text-center">
-                  <p className="text-text font-medium text-[14px] mb-1">
-                    Analyzing contributions...
-                  </p>
-                  <p className="text-text-muted text-[12px]">
-                    Computing survival, effective lines, module ownership and collaboration. This page will update automatically.
-                  </p>
-                </div>
-              )}
+            {/* e. Unlinked identities (only if any) */}
+            {unlinkedAliases.length > 0 && (
+              <UnlinkedIdentities
+                projectId={id}
+                unlinkedAliases={unlinkedAliases}
+                members={members}
+                onDataChanged={loadData}
+                readOnly={!isOwnerOrAdmin}
+              />
+            )}
 
-              {/* If analysis failed */}
-              {analysisStatus === "failed" && (
-                <div className="bg-surface border border-danger rounded-[6px] p-4 text-[13px]">
-                  <p className="text-danger font-medium mb-1">Analysis failed</p>
-                  <p className="text-text-muted mb-3">{analysisError || "An error occurred during scoring."}</p>
-                  <button
-                    type="button"
-                    onClick={handleReanalyze}
-                    disabled={actionLoading}
-                    className="btn-primary text-[12px] h-[30px]"
-                  >
-                    Retry analysis
-                  </button>
-                </div>
-              )}
-
-              {/* If complete */}
-              {analysisStatus === "complete" && scores && (
-                <>
-                  {/* Notice block for project-level flags */}
-                  {scores.project_flags && scores.project_flags.length > 0 && (
-                    <div className="bg-surface border border-border rounded-[4px] p-3 space-y-1.5 text-[12px]">
-                      <span className="font-semibold text-text uppercase tracking-wider text-[11px] block text-text-muted">
-                        Analysis Notices
-                      </span>
-                      {scores.project_flags.map((f) => (
-                        <div key={f.code} className="text-text flex items-start gap-2">
-                          <span className="font-mono text-[11px] text-text-muted border border-border px-1.5 py-0.5 rounded-[2px] bg-bg shrink-0">
-                            {f.code}
-                          </span>
-                          <span>{f.message}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Scores Table */}
-                  <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse text-sm">
-                        <thead>
-                          <tr className="border-b border-border bg-bg/50">
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                              Contributor
-                            </th>
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right w-[110px]">
-                              Share
-                            </th>
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider w-[180px]">
-                              Distribution
-                            </th>
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-center w-[100px]">
-                              Confidence
-                            </th>
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                              Flags
-                            </th>
-                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                              Details
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-border">
-                          {scores.members.map((m) => {
-                            const isExpanded = expandedMember === m.member_id;
-                            const ev = memberEvidences[m.member_id];
-                            const isEvLoading = evidenceLoading[m.member_id];
-                            const memDetail = members.find((x) => x.id === m.member_id);
-                            const isCurrentUserRow = Boolean(currentUser && memDetail && memDetail.user_id === currentUser.id);
-                            const pInfo = passportData[m.member_id];
-                            const pLoading = passportLoading[m.member_id];
-                            const pError = passportError[m.member_id];
-                            const pCopied = passportCopied[m.member_id];
-
-                            return (
-                              <React.Fragment key={m.member_id}>
-                                <tr className="hover:bg-bg/40 transition-colors duration-120">
-                                  <td className="py-3 px-4">
-                                    {m.display_name && (
-                                      <div className="font-medium text-text text-[13px] leading-tight">
-                                        {m.display_name}
-                                      </div>
-                                    )}
-                                    <div className="font-mono text-[12px] text-text-muted">
-                                      {m.github_login ? `@${m.github_login}` : "Unlinked"}
-                                    </div>
-                                  </td>
-                                  <td className="py-3 px-4 text-right font-mono text-[13px] font-semibold text-text tabular-nums">
-                                    {m.share_percent.toFixed(2)}%
-                                  </td>
-                                  <td className="py-3 px-4">
-                                    <div className="w-full bg-bg border border-border h-2.5 rounded-[2px] overflow-hidden">
-                                      <div
-                                        className="bg-accent h-full"
-                                        style={{ width: `${Math.min(Math.max(m.share_percent, 0), 100)}%` }}
-                                      />
-                                    </div>
-                                  </td>
-                                  <td className="py-3 px-4 text-center">
-                                    <span className="font-mono text-[11px] border border-border px-2 py-0.5 rounded-[4px] capitalize text-text">
-                                      {m.confidence}
-                                    </span>
-                                  </td>
-                                  <td className="py-3 px-4">
-                                    <div className="flex flex-wrap gap-1">
-                                      {m.flags.length > 0 ? (
-                                        m.flags.map((fl) => (
-                                          <span
-                                            key={fl}
-                                            className="font-mono text-[11px] border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted"
-                                          >
-                                            {fl}
-                                          </span>
-                                        ))
-                                      ) : (
-                                        <span className="text-[12px] text-text-muted">—</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="py-3 px-4 text-right">
-                                    <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                      <button
-                                        type="button"
-                                        onClick={() => toggleExpandMember(m.member_id)}
-                                        className="btn-secondary text-[12px] h-[28px] px-2.5"
-                                      >
-                                        {isExpanded ? "Hide breakdown" : "Why this score?"}
-                                      </button>
-                                      {isCurrentUserRow && (
-                                        <>
-                                          {pInfo ? (
-                                            <>
-                                              <a
-                                                href={`/p/${pInfo.code}`}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="btn-secondary text-[12px] h-[28px] px-2.5 inline-flex items-center text-accent"
-                                              >
-                                                View passport
-                                              </a>
-                                              <button
-                                                type="button"
-                                                onClick={() => handleCopyPassport(m.member_id, pInfo.code)}
-                                                className="btn-secondary text-[12px] h-[28px] px-2.5"
-                                              >
-                                                {pCopied ? "Copied" : "Copy link"}
-                                              </button>
-                                            </>
-                                          ) : (
-                                            <button
-                                              type="button"
-                                              onClick={() => handlePublish(m.member_id)}
-                                              disabled={pLoading}
-                                              className="btn-primary text-[12px] h-[28px] px-2.5"
-                                            >
-                                              {pLoading ? "Publishing..." : "Publish passport"}
-                                            </button>
-                                          )}
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setDisputingMemberId(disputingMemberId === m.member_id ? null : m.member_id);
-                                              setDisputeError(null);
-                                              setDisputeSuccess(null);
-                                            }}
-                                            className="btn-secondary text-[12px] h-[28px] px-2.5"
-                                          >
-                                            {disputingMemberId === m.member_id ? "Cancel dispute" : "Dispute this score"}
-                                          </button>
-                                        </>
-                                      )}
-                                    </div>
-                                    {pError && (
-                                      <div className="text-[11px] text-danger mt-1 text-right">{pError}</div>
-                                    )}
-                                  </td>
-                                </tr>
-
-                                {/* Inline Dispute Form */}
-                                {disputingMemberId === m.member_id && (
-                                  <tr className="bg-bg/40">
-                                    <td colSpan={6} className="p-4 border-b border-border">
-                                      <div className="max-w-xl space-y-2">
-                                        <div className="flex justify-between items-center">
-                                          <label className="text-[12px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                                            Dispute this contribution score
-                                          </label>
-                                          <span className="font-mono text-[11px] text-text-muted tabular-nums">
-                                            {1000 - disputeText.length} characters remaining
-                                          </span>
-                                        </div>
-                                        <textarea
-                                          value={disputeText}
-                                          onChange={(e) => setDisputeText(e.target.value)}
-                                          maxLength={1000}
-                                          rows={3}
-                                          placeholder="Describe why this score or attribution may be inaccurate..."
-                                          className="w-full text-[13px] bg-surface border border-border rounded-[4px] p-2 text-text focus:outline-none focus:ring-1 focus:ring-accent"
-                                        />
-                                        {disputeError && (
-                                          <div className="text-[12px] text-danger">{disputeError}</div>
-                                        )}
-                                        {disputeSuccess && (
-                                          <div className="text-[12px] text-success">{disputeSuccess}</div>
-                                        )}
-                                        <div className="flex gap-2 pt-1">
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSubmitDispute(m.member_id)}
-                                            disabled={disputeSubmitting || !disputeText.trim()}
-                                            className="btn-primary text-[12px] h-[30px] px-3 disabled:opacity-50"
-                                          >
-                                            {disputeSubmitting ? "Submitting..." : "Submit dispute"}
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setDisputingMemberId(null);
-                                              setDisputeError(null);
-                                              setDisputeSuccess(null);
-                                            }}
-                                            className="btn-secondary text-[12px] h-[30px] px-3"
-                                          >
-                                            Cancel
-                                          </button>
-                                        </div>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                )}
-
-                                {/* Expanded Evidence Breakdown */}
-                                {isExpanded && (
-                                  <tr className="bg-bg/25">
-                                    <td colSpan={6} className="p-4 border-b border-border">
-                                      {isEvLoading ? (
-                                        <p className="text-text-muted text-[12px] font-mono">Loading evidence...</p>
-                                      ) : ev ? (
-                                        <div className="space-y-4 text-[13px] text-text">
-                                          {/* Plain summary sentence */}
-                                          <div className="p-3 bg-surface border border-border rounded-[4px] font-medium text-text">
-                                            {ev.summary_sentence}
-                                          </div>
-
-                                          {/* Signal Breakdown */}
-                                          <div>
-                                            <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-2 text-text-muted">
-                                              Signal Breakdown
-                                            </h4>
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
-                                                <div className="text-[11px] text-text-muted uppercase">Survival ({Math.round(ev.signals.survival.weight * 100)}%)</div>
-                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
-                                                  {Math.round(ev.signals.survival.raw)} lines
-                                                </div>
-                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
-                                                  Share: {(ev.signals.survival.normalized * 100).toFixed(1)}%
-                                                </div>
-                                              </div>
-                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
-                                                <div className="text-[11px] text-text-muted uppercase">Effective Change ({Math.round(ev.signals.effective_change.weight * 100)}%)</div>
-                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
-                                                  {Math.round(ev.signals.effective_change.raw)} lines
-                                                </div>
-                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
-                                                  Share: {(ev.signals.effective_change.normalized * 100).toFixed(1)}%
-                                                </div>
-                                              </div>
-                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
-                                                <div className="text-[11px] text-text-muted uppercase">Ownership ({Math.round(ev.signals.ownership.weight * 100)}%)</div>
-                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
-                                                  {(ev.signals.ownership.normalized * 100).toFixed(1)}%
-                                                </div>
-                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
-                                                  {ev.owned_modules.length} owned module(s)
-                                                </div>
-                                              </div>
-                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
-                                                <div className="text-[11px] text-text-muted uppercase">Collaboration ({Math.round(ev.signals.collaboration.weight * 100)}%)</div>
-                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
-                                                  {ev.signals.collaboration.raw.toFixed(1)} pts
-                                                </div>
-                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
-                                                  Share: {(ev.signals.collaboration.normalized * 100).toFixed(1)}%
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </div>
-
-                                          {/* Owned Modules */}
-                                          {ev.owned_modules.length > 0 && (
-                                            <div>
-                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
-                                                Owned Modules
-                                              </h4>
-                                              <div className="flex flex-wrap gap-2">
-                                                {ev.owned_modules.map((om) => (
-                                                  <span key={om.path} className="font-mono text-[12px] border border-border bg-surface px-2 py-0.5 rounded-[4px]">
-                                                    {om.path} <span className="text-text-muted">({(om.share * 100).toFixed(1)}% lead)</span>
-                                                  </span>
-                                                ))}
-                                              </div>
-                                            </div>
-                                          )}
-
-                                          {/* Top Commits & Files Grid */}
-                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            <div>
-                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
-                                                Top Commits by Impact
-                                              </h4>
-                                              {ev.top_commits.length === 0 ? (
-                                                <p className="text-[12px] text-text-muted">No counted commits</p>
-                                              ) : (
-                                                <div className="space-y-1">
-                                                  {ev.top_commits.map((tc) => (
-                                                    <div key={tc.sha} className="text-[12px] flex items-center justify-between gap-2 p-1.5 bg-surface border border-border rounded-[4px]">
-                                                      <div className="truncate flex items-center gap-1.5">
-                                                        {tc.commit_url ? (
-                                                          <a
-                                                            href={tc.commit_url}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="font-mono text-accent hover:underline"
-                                                          >
-                                                            {tc.sha.slice(0, 7)}
-                                                          </a>
-                                                        ) : (
-                                                          <span className="font-mono text-text">{tc.sha.slice(0, 7)}</span>
-                                                        )}
-                                                        <span className="truncate text-text">{tc.subject}</span>
-                                                      </div>
-                                                      <span className="font-mono text-text-muted text-[11px] tabular-nums whitespace-nowrap">
-                                                        +{tc.effective_lines}
-                                                      </span>
-                                                    </div>
-                                                  ))}
-                                                </div>
-                                              )}
-                                            </div>
-
-                                            <div>
-                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
-                                                Top Files by Surviving Code
-                                              </h4>
-                                              {ev.top_files.length === 0 ? (
-                                                <p className="text-[12px] text-text-muted">No surviving files</p>
-                                              ) : (
-                                                <div className="space-y-1">
-                                                  {ev.top_files.map((tf) => (
-                                                    <div key={tf.path} className="text-[12px] flex items-center justify-between gap-2 p-1.5 bg-surface border border-border rounded-[4px]">
-                                                      <span className="font-mono truncate text-text">{tf.path}</span>
-                                                      <span className="font-mono text-text-muted text-[11px] tabular-nums whitespace-nowrap">
-                                                        {tf.surviving_lines} lines
-                                                      </span>
-                                                    </div>
-                                                  ))}
-                                                </div>
-                                              )}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ) : (
-                                        <p className="text-text-muted text-[12px]">Failed to load evidence breakdown.</p>
-                                      )}
-                                    </td>
-                                  </tr>
-                                )}
-                              </React.Fragment>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Footer line */}
-                  <div className="text-[12px] text-text-muted font-mono pt-1">
-                    Scoring version {scores.scoring_version}. Weights: survival {Math.round((scores.weights.survival ?? 0.4) * 100)}%, effective change {Math.round((scores.weights.effective_change ?? 0.25) * 100)}%, ownership {Math.round((scores.weights.ownership ?? 0.15) * 100)}%, collaboration {Math.round((scores.weights.collaboration ?? 0.2) * 100)}%.
-                  </div>
-                </>
-              )}
-            </section>
+            {/* f. Recent Commits */}
+            <RecentCommits commits={commits} />
 
             {/* Disputes Panel */}
-            {(isOwnerOrAdmin || isAssignedFaculty || disputes.length > 0) && (
-              <section className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                    Disputes
-                  </h2>
-                  <span className="font-mono text-[12px] text-text-muted">
-                    {disputes.length} {disputes.length === 1 ? "dispute" : "disputes"}
-                  </span>
-                </div>
+            <DisputesPanel
+              projectId={id}
+              disputes={disputes}
+              members={members}
+              currentUser={currentUser}
+              isOwnerOrAdmin={isOwnerOrAdmin}
+              isAssignedFaculty={isAssignedFaculty}
+              onDisputesChanged={handleRefreshDisputes}
+            />
 
-                {disputeNotice && (
-                  <div className="p-3 bg-surface border border-border rounded-[4px] text-[13px] text-text">
-                    {disputeNotice}
-                  </div>
-                )}
+            {/* g. Three panels at the very bottom: Reviewers, Summaries, Originality */}
+            <CollapsiblePanel
+              id="reviewers"
+              title="Project reviewers"
+              description="Invited reviewers with review and dispute oversight access."
+              statusText={reviewersStatusText}
+            >
+              <ReviewersPanel
+                projectId={id}
+                reviewers={reviewersList}
+                isOwnerOrAdmin={isOwnerOrAdmin}
+                onReviewersUpdated={handleRefreshReviewers}
+                hideHeader={true}
+              />
+            </CollapsiblePanel>
 
-                <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                  {disputes.length === 0 ? (
-                    <div className="p-4 text-center text-text-muted text-[13px]">
-                      No disputes recorded for this project.
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-border">
-                      {disputes.map((d) => {
-                        const dateStr = d.created_at
-                          ? new Date(d.created_at).toISOString().replace("T", " ").slice(0, 16) + " UTC"
-                          : "—";
-                        const mem = members.find((x) => x.id === d.member_id);
-                        const memberLabel = mem ? (mem.display_name || mem.login || d.member_id) : d.member_id;
-                        const isOpen = d.status === "open";
-                        const canResolve = (isOwnerOrAdmin || isAssignedFaculty) && isOpen && (currentUser?.role === "admin" || isAssignedFaculty || d.raised_by !== currentUser?.id);
+            <CollapsiblePanel
+              id="summaries"
+              title="Evidence-grounded summaries"
+              description="Natural language summaries of contributor achievements, audited against commit hashes."
+              statusText={summariesStatusText}
+            >
+              <SummariesPanel
+                projectId={id}
+                repoFullName={project.repo_full_name}
+                summaries={summaries}
+                isOwnerOrAdmin={isOwnerOrAdmin}
+                onSummariesUpdated={handleRefreshSummaries}
+                analysisStatus={analysisStatus}
+                hideHeader={true}
+              />
+            </CollapsiblePanel>
 
-                        return (
-                          <div key={d.id} className="p-4 space-y-3 text-[13px]">
-                            <div className="flex items-center justify-between flex-wrap gap-2">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-text">{memberLabel}</span>
-                                <span className="font-mono text-[12px] text-text-muted">{dateStr}</span>
-                              </div>
-                              <span
-                                className={`font-mono text-[11px] px-2 py-0.5 rounded-[3px] border uppercase ${
-                                  d.status === "open"
-                                    ? "border-warning text-warning bg-warning/5"
-                                    : d.status === "resolved"
-                                    ? "border-success text-success bg-success/5"
-                                    : "border-border text-text-muted bg-bg"
-                                }`}
-                              >
-                                {d.status}
-                              </span>
-                            </div>
-
-                            <p className="text-text font-sans whitespace-pre-wrap">{d.text}</p>
-
-                            {d.resolution_note && (
-                              <div className="p-2.5 bg-bg/50 border border-border rounded-[4px] text-[12px] text-text-muted">
-                                <span className="font-medium text-text">Resolution note: </span>
-                                {d.resolution_note}
-                              </div>
-                            )}
-
-                            {isOpen && canResolve && (
-                              <div className="pt-2 border-t border-border flex flex-col sm:flex-row gap-2 items-start sm:items-center">
-                                <input
-                                  type="text"
-                                  placeholder="Resolution note (optional)..."
-                                  value={resolutionNotes[d.id] || ""}
-                                  onChange={(e) =>
-                                    setResolutionNotes({ ...resolutionNotes, [d.id]: e.target.value })
-                                  }
-                                  className="text-[12px] h-[30px] px-2.5 bg-surface border border-border rounded-[4px] text-text flex-1 min-w-[200px] focus:outline-none focus:ring-1 focus:ring-accent"
-                                />
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleResolveDispute(d.id, "resolved")}
-                                    disabled={resolvingId === d.id}
-                                    className="btn-primary text-[12px] h-[30px] px-3"
-                                  >
-                                    {resolvingId === d.id ? "Saving..." : "Resolve"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleResolveDispute(d.id, "rejected")}
-                                    disabled={resolvingId === d.id}
-                                    className="btn-secondary text-[12px] h-[30px] px-3"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {/* Section 5: Faculty Assignment Panel */}
-            {isOwnerOrAdmin && (
-              <section className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                      Assigned Faculty
-                    </h2>
-                    <p className="text-xs text-text-muted mt-0.5">
-                      Instructors assigned to review contributions, audit evidence, and resolve disputes.
-                    </p>
-                  </div>
-                  <span className="font-mono text-[12px] text-text-muted">
-                    {facultyList.length} assigned
-                  </span>
-                </div>
-
-                {facultyError && (
-                  <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
-                    <span>{facultyError}</span>
-                    <button onClick={() => setFacultyError(null)} className="text-xs text-danger/70 hover:text-danger">
-                      Dismiss
-                    </button>
-                  </div>
-                )}
-
-                <div className="bg-surface border border-border rounded-[6px] p-4 space-y-4">
-                  <form onSubmit={handleAddFaculty} className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder="GitHub username to assign..."
-                      value={facultyInput}
-                      onChange={(e) => setFacultyInput(e.target.value)}
-                      disabled={addingFaculty}
-                      className="text-[13px] h-[32px] px-3 bg-surface border border-border rounded-[4px] text-text flex-1 max-w-[300px] focus:outline-none focus:border-accent"
-                    />
-                    <button
-                      type="submit"
-                      disabled={addingFaculty || !facultyInput.trim()}
-                      className="btn-secondary h-[32px] px-3 text-[13px]"
-                    >
-                      {addingFaculty ? "Assigning..." : "Assign faculty"}
-                    </button>
-                  </form>
-
-                  {facultyList.length === 0 ? (
-                    <p className="text-xs text-text-muted">No faculty members currently assigned to this project.</p>
-                  ) : (
-                    <div className="divide-y divide-border border-t border-border pt-2">
-                      {facultyList.map((f) => (
-                        <div key={f.id} className="py-2.5 flex items-center justify-between gap-4">
-                          <div className="flex items-center gap-2.5">
-                            {f.avatar_url ? (
-                              <Image
-                                src={f.avatar_url}
-                                alt={f.username}
-                                width={24}
-                                height={24}
-                                unoptimized
-                                className="w-6 h-6 rounded-[3px] border border-border object-cover"
-                              />
-                            ) : (
-                              <div className="w-6 h-6 rounded-[3px] bg-bg border border-border flex items-center justify-center text-[10px] font-mono text-text-muted">
-                                {f.username.slice(0, 2).toUpperCase()}
-                              </div>
-                            )}
-                            <div>
-                              <span className="font-mono text-[13px] font-medium text-text">{f.username}</span>
-                              {f.display_name && (
-                                <span className="ml-2 text-xs text-text-muted">({f.display_name})</span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono text-[11px] text-text-muted">
-                              Assigned {new Date(f.assigned_at).toISOString().split("T")[0]}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveFaculty(f.user_id)}
-                              className="text-xs text-danger/80 hover:text-danger font-medium"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {/* Section 5: Evidence-Grounded Summaries Panel */}
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                    Evidence-Grounded Summaries
-                  </h2>
-                  <p className="text-xs text-text-muted mt-0.5">
-                    Natural language summaries of contributor achievements, audited against commit hashes.
-                  </p>
-                </div>
-                {isOwnerOrAdmin && (
-                  <button
-                    type="button"
-                    onClick={handleGenerateSummaries}
-                    disabled={generatingSummaries}
-                    className="btn-secondary text-[12px] h-[30px] px-3"
-                  >
-                    {generatingSummaries ? "Generating..." : "Generate summaries"}
-                  </button>
-                )}
-              </div>
-
-              {summariesError && (
-                <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
-                  <span>{summariesError}</span>
-                  <button onClick={() => setSummariesError(null)} className="text-xs text-danger/70 hover:text-danger">
-                    Dismiss
-                  </button>
-                </div>
-              )}
-
-              <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                {summaries.length === 0 ? (
-                  <div className="p-6 text-center text-text-muted text-[13px]">
-                    No contributor summaries generated yet.
-                    {isOwnerOrAdmin && " Click 'Generate summaries' to analyze contributor commits and generate evidence-backed summaries."}
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border">
-                    {summaries.map((s) => {
-                      const mem = members.find((m) => m.id === s.member_id);
-                      const memberLabel = mem ? (mem.display_name || mem.login || s.member_id) : s.member_id;
-
-                      return (
-                        <div key={s.id} className="p-5 space-y-3">
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-semibold text-text text-[14px]">{memberLabel}</span>
-                              {mem?.login && (
-                                <span className="font-mono text-xs text-text-muted">@{mem.login}</span>
-                              )}
-                            </div>
-                            <div>
-                              {s.method === "llm" ? (
-                                <span className="inline-block px-2 py-0.5 text-[11px] font-medium rounded-[4px] bg-accent/10 text-accent border border-accent/20">
-                                  Generated by AI from repository evidence
-                                </span>
-                              ) : (
-                                <span className="inline-block px-2 py-0.5 text-[11px] font-medium rounded-[4px] bg-bg text-text-muted border border-border">
-                                  Generated from repository evidence
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          <p className="text-[13px] text-text leading-relaxed font-sans whitespace-pre-wrap">
-                            {s.summary_text}
-                          </p>
-
-                          {s.citations && s.citations.length > 0 && (
-                            <div className="pt-2 flex flex-wrap items-center gap-1.5 text-xs">
-                              <span className="text-text-muted font-medium text-[11px] uppercase tracking-wider mr-1">
-                                Citations:
-                              </span>
-                              {s.citations.map((sha) => (
-                                <a
-                                  key={sha}
-                                  href={`https://github.com/${project.repo_full_name}/commit/${sha}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="font-mono text-accent hover:underline text-[12px] bg-bg px-1.5 py-0.5 rounded border border-border transition-colors"
-                                  title={`View commit ${sha}`}
-                                >
-                                  {sha.slice(0, 7)}
-                                </a>
-                              ))}
-                            </div>
-                          )}
-
-                          {s.disclaimer && (
-                            <p className="text-[11px] text-text-muted pt-1 border-t border-border/50">
-                              {s.disclaimer}
-                            </p>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </section>
-
-            {/* Section 5: Originality & Similarity Check Panel */}
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                    Originality &amp; Similarity Check
-                  </h2>
-                  <p className="text-xs text-text-muted mt-0.5">
-                    Cross-repository winnowing fingerprint analysis to identify shared code blocks and templates.
-                  </p>
-                </div>
-                {isOwnerOrAdmin && (
-                  <button
-                    type="button"
-                    onClick={handleRunOriginality}
-                    disabled={runningOriginality}
-                    className="btn-secondary text-[12px] h-[30px] px-3"
-                  >
-                    {runningOriginality ? "Scanning..." : "Run originality check"}
-                  </button>
-                )}
-              </div>
-
-              {originalityError && (
-                <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
-                  <span>{originalityError}</span>
-                  <button onClick={() => setOriginalityError(null)} className="text-xs text-danger/70 hover:text-danger">
-                    Dismiss
-                  </button>
-                </div>
-              )}
-
-              <div className="bg-surface border border-border rounded-[6px] p-5 space-y-4">
-                {!originalityResponse ? (
-                  <div className="text-center text-text-muted text-[13px] py-4">
-                    Originality analysis has not been run for this repository.
-                    {isOwnerOrAdmin && " Click 'Run originality check' to scan against comparison repositories."}
-                  </div>
-                ) : originalityResponse.matches && originalityResponse.matches.length > 0 ? (
-                  <div className="space-y-4">
-                    <div className="p-3 bg-warning/10 border border-warning/30 rounded-[4px]">
-                      <h3 className="text-sm font-semibold text-warning">
-                        Similarity found. Please review.
-                      </h3>
-                      <p className="text-xs text-text-muted mt-1">
-                        {originalityResponse.disclaimer}
-                      </p>
-                    </div>
-
-                    <div className="overflow-x-auto border border-border rounded-[4px]">
-                      <table className="w-full text-left border-collapse text-sm">
-                        <thead>
-                          <tr className="border-b border-border bg-bg/50">
-                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                              Compared Repository
-                            </th>
-                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                              Shared Lines (est.)
-                            </th>
-                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                              Shared Fingerprints
-                            </th>
-                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                              Matching Files
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-border text-[13px]">
-                          {originalityResponse.matches.map((m, idx) => (
-                            <tr key={m.id || idx} className="hover:bg-bg/40 transition-colors">
-                              <td className="py-2.5 px-3 font-mono text-text">
-                                {m.other_project_name || "Comparison repository"}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-mono text-text">
-                                ~{m.shared_lines_estimate}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-mono text-text-muted">
-                                {m.shared_fingerprints}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                {m.top_files && m.top_files.length > 0 ? (
-                                  <div className="space-y-1">
-                                    {m.top_files.map((tf, fIdx) => (
-                                      <div key={fIdx} className="font-mono text-xs text-text-muted">
-                                        <span className="text-text">{tf.file}</span>
-                                        {tf.file !== tf.other_file && (
-                                          <span> &harr; {tf.other_file}</span>
-                                        )}
-                                        <span className="ml-1 text-[11px] text-text-muted">({tf.count} hashes)</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-text-muted">—</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : originalityResponse.external_similarity_flag ? (
-                  <div className="space-y-3">
-                    <div className="p-3 bg-warning/10 border border-warning/30 rounded-[4px]">
-                      <h3 className="text-sm font-semibold text-warning">
-                        Similarity found. Please review.
-                      </h3>
-                      <p className="text-xs text-text mt-1">
-                        Similarity detected across {originalityResponse.external_match_count || 1} external repository projects.
-                      </p>
-                      <p className="text-xs text-text-muted mt-1">
-                        {originalityResponse.disclaimer}
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="text-[13px] text-text">
-                      No substantial similarity detected across comparison repositories (minimum threshold: {originalityResponse.threshold_lines} lines).
-                    </p>
-                    <p className="text-xs text-text-muted">
-                      {originalityResponse.disclaimer}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </section>
-
-
-            {/* 2) Members Table */}
-            <section className="space-y-3">
-              <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                Members
-              </h2>
-              <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-sm">
-                    <thead>
-                      <tr className="border-b border-border bg-bg/50">
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          Login
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                          Commits
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                          Additions (+)
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                          Deletions (-)
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                          PRs
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                          Reviews
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          First Commit (UTC)
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          Last Commit (UTC)
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border font-mono text-[13px]">
-                      {members.map((m) => {
-                        const firstStr = m.first_commit_at
-                          ? new Date(m.first_commit_at).toISOString().slice(0, 10)
-                          : "—";
-                        const lastStr = m.last_commit_at
-                          ? new Date(m.last_commit_at).toISOString().slice(0, 10)
-                          : "—";
-
-                        return (
-                          <tr key={m.id} className="hover:bg-bg/40 transition-colors duration-120">
-                            <td className="py-2.5 px-4 font-medium text-text">
-                              {m.login || "unknown"}
-                              {m.display_name && (
-                                <span className="font-sans text-text-muted text-[12px] ml-2">
-                                  ({m.display_name})
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-4 text-right tabular-nums text-text">
-                              {m.commit_count.toLocaleString()}
-                            </td>
-                            <td className="py-2.5 px-4 text-right tabular-nums text-success">
-                              +{m.additions.toLocaleString()}
-                            </td>
-                            <td className="py-2.5 px-4 text-right tabular-nums text-danger">
-                              -{m.deletions.toLocaleString()}
-                            </td>
-                            <td className="py-2.5 px-4 text-right tabular-nums text-text">
-                              {m.pull_requests_opened}
-                            </td>
-                            <td className="py-2.5 px-4 text-right tabular-nums text-text">
-                              {m.reviews_given}
-                            </td>
-                            <td className="py-2.5 px-4 tabular-nums text-text-muted">
-                              {firstStr}
-                            </td>
-                            <td className="py-2.5 px-4 tabular-nums text-text-muted">
-                              {lastStr}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      {members.length === 0 && (
-                        <tr>
-                          <td colSpan={8} className="py-4 px-4 text-center text-text-muted font-sans text-sm">
-                            No members resolved yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </section>
-
-            {/* 3) Unlinked Identities & Merge Controls */}
-            {unlinkedAliases.length > 0 && (
-              <section className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                    Unlinked identities
-                  </h2>
-                </div>
-
-                <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse text-sm">
-                      <thead>
-                        <tr className="border-b border-border bg-bg/50">
-                          <th className="py-2 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                            Author name
-                          </th>
-                          <th className="py-2 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                            Email
-                          </th>
-                          <th className="py-2 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
-                            Commits
-                          </th>
-                          <th className="py-2 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                            Assign to member
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border font-mono text-[13px]">
-                        {unlinkedAliases.map((a) => (
-                          <tr key={a.id} className="hover:bg-bg/40 transition-colors duration-120">
-                            <td className="py-2 px-4 text-text">{a.name}</td>
-                            <td className="py-2 px-4 text-text-muted">{a.email}</td>
-                            <td className="py-2 px-4 text-right tabular-nums text-text">
-                              {a.commit_count}
-                            </td>
-                            <td className="py-2 px-4 font-sans">
-                              <div className="flex items-center gap-2">
-                                <select
-                                  aria-label={`Assign member for ${a.name}`}
-                                  value={selectedMemberForAlias[a.id] || ""}
-                                  onChange={(e) =>
-                                    setSelectedMemberForAlias({
-                                      ...selectedMemberForAlias,
-                                      [a.id]: e.target.value,
-                                    })
-                                  }
-                                  className="h-[30px] px-2 text-[12px] bg-surface border border-border rounded-[4px] text-text focus:outline-none"
-                                >
-                                  <option value="">Select member...</option>
-                                  {members.map((m) => (
-                                    <option key={m.id} value={m.id}>
-                                      {m.login}
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  onClick={() => handleAssign(a.id)}
-                                  disabled={actionLoading || !selectedMemberForAlias[a.id]}
-                                  className="btn-secondary h-[30px] px-2.5 text-[12px]"
-                                >
-                                  Assign
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Merge Members Control for Owners */}
-                {members.length > 1 && (
-                  <div className="bg-surface border border-border rounded-[6px] p-4 space-y-3">
-                    <h3 className="text-[13px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                      Merge members
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-3 text-sm">
-                      <div className="flex items-center gap-2">
-                        <span className="text-text-muted text-[13px]">Move from:</span>
-                        <select
-                          aria-label="Source member to merge from"
-                          value={mergeSource}
-                          onChange={(e) => setMergeSource(e.target.value)}
-                          className="h-[32px] px-2 font-mono text-[13px] bg-surface border border-border rounded-[4px] text-text focus:outline-none"
-                        >
-                          <option value="">Select source member...</option>
-                          {members.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.login}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="text-text-muted text-[13px]">into:</span>
-                        <select
-                          aria-label="Target member to merge into"
-                          value={mergeTarget}
-                          onChange={(e) => setMergeTarget(e.target.value)}
-                          className="h-[32px] px-2 font-mono text-[13px] bg-surface border border-border rounded-[4px] text-text focus:outline-none"
-                        >
-                          <option value="">Select target member...</option>
-                          {members.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.login}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={handleMerge}
-                        disabled={
-                          actionLoading ||
-                          !mergeSource ||
-                          !mergeTarget ||
-                          mergeSource === mergeTarget
-                        }
-                        className={`btn-secondary h-[32px] px-3 text-[13px] ${
-                          confirmMerge ? "border-danger text-danger" : ""
-                        }`}
-                      >
-                        {confirmMerge ? "Confirm merge" : "Merge members"}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </section>
-            )}
-
-            {/* 4) Recent Commits */}
-            <section className="space-y-3">
-              <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
-                Recent commits
-              </h2>
-              <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-sm">
-                    <thead>
-                      <tr className="border-b border-border bg-bg/50">
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          SHA
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          Author
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          Date (UTC)
-                        </th>
-                        <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
-                          Subject
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border text-[13px]">
-                      {commits.map((c) => {
-                        const dateStr = c.authored_at
-                          ? new Date(c.authored_at).toISOString().replace("T", " ").replace(/\..+/, "")
-                          : "—";
-
-                        return (
-                          <tr key={c.id} className="hover:bg-bg/40 transition-colors duration-120">
-                            <td className="py-2 px-4 font-mono font-medium text-accent">
-                              {c.sha.slice(0, 7)}
-                            </td>
-                            <td className="py-2 px-4 text-text">{c.author_name}</td>
-                            <td className="py-2 px-4 font-mono text-text-muted tabular-nums">
-                              {dateStr}
-                            </td>
-                            <td className="py-2 px-4 text-text truncate max-w-[400px]">
-                              {c.subject}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      {commits.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="py-4 px-4 text-center text-text-muted font-sans text-sm">
-                            No commits recorded.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </section>
+            <CollapsiblePanel
+              id="originality"
+              title="Originality and similarity check"
+              description="Cross-repository fingerprint analysis to identify shared code blocks and templates."
+              statusText={originalityStatusText}
+            >
+              <OriginalityPanel
+                projectId={id}
+                originalityResponse={originalityResponse}
+                isOwnerOrAdmin={isOwnerOrAdmin}
+                onCheckCompleted={handleRefreshOriginality}
+                hideHeader={true}
+              />
+            </CollapsiblePanel>
           </>
         )}
       </main>

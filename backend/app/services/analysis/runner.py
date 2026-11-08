@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal
 import logging
@@ -31,7 +32,7 @@ from app.services.analysis.flags import (
 )
 from app.services.analysis.ownership import compute_module_ownership
 from app.services.analysis.scoring import calculate_final_scores
-from app.services.analysis.survival import ProjectSurvivalResults, process_file_blame
+from app.services.analysis.survival import ProjectSurvivalResults, get_top_level_module, process_file_blame
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,11 @@ def _resolve_head_sha(clone_path: str, default_branch: Optional[str] = None) -> 
     return None
 
 
-def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[str, int]], int, int]:
+def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[str, int, str]], int, int]:
     """
     Lists files in bare repository via git ls-tree -r -l <head_sha>.
     Returns (candidate_files, files_total, files_ignored).
-    Each candidate is (path, size_bytes).
+    Each candidate is (path, size_bytes, blob_sha).
     """
     cmd = ["git", "--git-dir", clone_path, "ls-tree", "-r", "-l", head_sha]
     proc = subprocess.run(
@@ -92,7 +93,7 @@ def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[st
     if proc.returncode != 0:
         return [], 0, 0
 
-    candidate_files: List[Tuple[str, int]] = []
+    candidate_files: List[Tuple[str, int, str]] = []
     files_total = 0
     files_ignored = 0
 
@@ -107,6 +108,7 @@ def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[st
         meta_part, file_path = parts[0], parts[1].strip()
         meta_tokens = meta_part.split()
         size_bytes = None
+        blob_sha = meta_tokens[2] if len(meta_tokens) >= 3 else ""
         if len(meta_tokens) >= 4 and meta_tokens[3].isdigit():
             size_bytes = int(meta_tokens[3])
 
@@ -115,9 +117,64 @@ def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[st
         if ignored:
             files_ignored += 1
         else:
-            candidate_files.append((file_path, size_bytes or 0))
+            candidate_files.append((file_path, size_bytes or 0, blob_sha))
 
     return candidate_files, files_total, files_ignored
+
+
+def _process_and_record_blame(
+    file_path: str,
+    blame_output: str,
+    alias_lookup_fn: Callable[[str, str], Optional[str]],
+    results: ProjectSurvivalResults,
+) -> Dict[str, Any]:
+    meaningful_lines = process_file_blame(
+        file_path=file_path,
+        blame_output=blame_output,
+        alias_lookup_fn=alias_lookup_fn,
+        results=results,
+    )
+    module = get_top_level_module(file_path)
+    member_breakdown: Dict[str, int] = {}
+    for m_id, m_data in results.members.items():
+        if file_path in m_data.file_lines:
+            member_breakdown[m_id] = m_data.file_lines[file_path]
+    return {
+        "meaningful_lines": meaningful_lines,
+        "module": module,
+        "member_lines": member_breakdown,
+    }
+
+
+def _apply_cached_file_survival(
+    file_path: str,
+    cached_data: Dict[str, Any],
+    results: ProjectSurvivalResults,
+) -> None:
+    m_lines = cached_data.get("meaningful_lines", 0)
+    module = cached_data.get("module") or get_top_level_module(file_path)
+    results.total_surviving_lines += m_lines
+    results.module_totals[module] = results.module_totals.get(module, 0) + m_lines
+    results.file_totals[file_path] = m_lines
+    for m_id, cnt in cached_data.get("member_lines", {}).items():
+        m_data = results.get_or_create_member(m_id)
+        m_data.total_lines += cnt
+        m_data.file_lines[file_path] = cnt
+        m_data.module_lines[module] = m_data.module_lines.get(module, 0) + cnt
+
+
+def _update_analysis_progress(
+    db: Session,
+    project: Project,
+    step: str,
+    percent: int,
+) -> None:
+    try:
+        project.progress_step = step
+        project.progress_percent = percent
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def run_analysis(
@@ -142,6 +199,7 @@ def run_analysis(
 
     run_id: Optional[uuid.UUID] = None
     start_time = time.time()
+    analysis_timings: Dict[str, float] = {}
 
     try:
         if not ANALYSIS_SEMAPHORE.acquire(blocking=True, timeout=settings.ANALYSIS_TIMEOUT_SECONDS):
@@ -188,12 +246,14 @@ def run_analysis(
             db.add(analysis_run)
             project.analysis_status = "running"
             project.analysis_error = None
-            db.commit()
+            _update_analysis_progress(db, project, "Analyzing repository files...", 70)
             db.refresh(analysis_run)
             run_id = analysis_run.id
 
             # 1. Candidate file selection
+            t_list_start = time.time()
             candidates, files_total, files_ignored = _list_candidate_files(clone_path, head_sha)
+            analysis_timings["list_files"] = round(time.time() - t_list_start, 3)
 
             is_truncated = False
             project_flags: List[str] = []
@@ -234,57 +294,173 @@ def run_analysis(
             member_id_to_member = {str(m.id): m for m in members}
             member_logins = {str(m.id): m.github_login for m in members}
 
-            # 3. Blame and survival processing
+            # 3. Blame and survival processing (with incremental diff and parallel blame pool)
+            t_blame_start = time.time()
             survival_results = ProjectSurvivalResults()
             per_file_timeout = 25
+            current_file_survival: Dict[str, Any] = {}
+            files_to_blame: List[Tuple[str, int, str]] = []
 
-            for file_path, _ in candidates:
-                # Check global analysis timeout
-                elapsed = time.time() - start_time
-                if elapsed > settings.ANALYSIS_TIMEOUT_SECONDS:
-                    is_truncated = True
-                    if "truncated" not in project_flags:
-                        project_flags.append("truncated")
-                    break
+            # Check for previous completed analysis run for incremental re-blame
+            prev_run = (
+                db.query(AnalysisRun)
+                .filter(
+                    AnalysisRun.project_id == project.id,
+                    AnalysisRun.status == AnalysisRunStatus.complete,
+                    AnalysisRun.id != run_id,
+                )
+                .order_by(AnalysisRun.started_at.desc())
+                .first()
+            )
 
-                blame_cmd = [
-                    "git",
-                    "--git-dir",
-                    clone_path,
-                    "blame",
-                    "--line-porcelain",
-                    "-w",
-                    "-M",
-                    "-C",
-                    head_sha,
-                    "--",
-                    file_path,
-                ]
-                try:
-                    blame_proc = subprocess.run(
-                        blame_cmd,
+            if (
+                prev_run
+                and prev_run.head_sha
+                and isinstance(prev_run.stats, dict)
+                and "file_survival" in prev_run.stats
+                and isinstance(prev_run.stats["file_survival"], dict)
+            ):
+                prev_survival = prev_run.stats["file_survival"]
+                if prev_run.head_sha == head_sha:
+                    changed_files = set()
+                else:
+                    diff_cmd = ["git", "--git-dir", clone_path, "diff", "--name-only", prev_run.head_sha, head_sha]
+                    diff_proc = subprocess.run(
+                        diff_cmd,
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
                         errors="replace",
                         shell=False,
-                        timeout=per_file_timeout,
+                        timeout=30,
                     )
-                    if blame_proc.returncode == 0:
-                        process_file_blame(
-                            file_path=file_path,
-                            blame_output=blame_proc.stdout,
-                            alias_lookup_fn=lookup_member,
-                            results=survival_results,
+                    if diff_proc.returncode == 0:
+                        changed_files = set(line.strip() for line in diff_proc.stdout.splitlines() if line.strip())
+                    else:
+                        changed_files = None
+
+                if changed_files is not None:
+                    for file_path, size_bytes, blob_sha in candidates:
+                        if file_path not in changed_files and file_path in prev_survival:
+                            _apply_cached_file_survival(file_path, prev_survival[file_path], survival_results)
+                            current_file_survival[file_path] = prev_survival[file_path]
+                        else:
+                            files_to_blame.append((file_path, size_bytes, blob_sha))
+                else:
+                    files_to_blame = list(candidates)
+            else:
+                files_to_blame = list(candidates)
+
+            # In-memory blame cache keyed by (blob_sha, path)
+            blame_cache: Dict[Tuple[str, str], str] = {}
+            blame_cache_lock = threading.Lock()
+            total_to_blame = len(files_to_blame)
+            blamed_done = 0
+            max_workers = max(1, settings.ANALYSIS_WORKERS)
+
+            if total_to_blame > 0:
+                _update_analysis_progress(
+                    db,
+                    project,
+                    f"Blaming files 0 of {total_to_blame}",
+                    70,
+                )
+
+                def _blame_worker(item: Tuple[str, int, str]) -> Tuple[str, Optional[str]]:
+                    f_path, _, b_sha = item
+                    cache_key = (b_sha, f_path)
+                    if b_sha:
+                        with blame_cache_lock:
+                            if cache_key in blame_cache:
+                                return f_path, blame_cache[cache_key]
+
+                    cmd = [
+                        "git",
+                        "--git-dir",
+                        clone_path,
+                        "blame",
+                        "--line-porcelain",
+                        "-w",
+                        "-M",
+                        "-C",
+                        head_sha,
+                        "--",
+                        f_path,
+                    ]
+                    try:
+                        p = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            shell=False,
+                            timeout=per_file_timeout,
                         )
-                except subprocess.TimeoutExpired:
-                    continue
-                except Exception as ex:
-                    logger.debug("Blame failed for %s: %s", file_path, ex)
-                    continue
+                        if p.returncode == 0:
+                            out = p.stdout
+                            if b_sha:
+                                with blame_cache_lock:
+                                    blame_cache[cache_key] = out
+                            return f_path, out
+                    except Exception as ex:
+                        logger.debug("Blame failed for %s: %s", f_path, ex)
+                    return f_path, None
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(_blame_worker, item): item[0] for item in files_to_blame}
+                    for future in as_completed(futures):
+                        elapsed = time.time() - start_time
+                        if elapsed > settings.ANALYSIS_TIMEOUT_SECONDS:
+                            is_truncated = True
+                            if "truncated" not in project_flags:
+                                project_flags.append("truncated")
+                            for f in futures:
+                                f.cancel()
+                            break
+
+                        f_path, blame_out = future.result()
+                        blamed_done += 1
+                        if blame_out:
+                            file_record = _process_and_record_blame(
+                                file_path=f_path,
+                                blame_output=blame_out,
+                                alias_lookup_fn=lookup_member,
+                                results=survival_results,
+                            )
+                            current_file_survival[f_path] = file_record
+
+                        if blamed_done % 5 == 0 or blamed_done == total_to_blame:
+                            pct = 70 + int((blamed_done / max(1, total_to_blame)) * 15)
+                            _update_analysis_progress(
+                                db,
+                                project,
+                                f"Blaming files {blamed_done} of {total_to_blame}",
+                                pct,
+                            )
+
+            analysis_timings["git_blame"] = round(time.time() - t_blame_start, 3)
 
             # 4. Effective change over stored commits
+            _update_analysis_progress(db, project, "Computing effective change...", 86)
+            t_eff_start = time.time()
             db_commits = db.query(Commit).filter(Commit.project_id == project.id).all()
+
+            # Apply history window filter if project has history_since
+            if project.history_since:
+                h_since = project.history_since
+                if h_since.tzinfo is None:
+                    h_since = h_since.replace(tzinfo=timezone.utc)
+                filtered_commits = []
+                for c in db_commits:
+                    if c.authored_at:
+                        c_date = c.authored_at
+                        if c_date.tzinfo is None:
+                            c_date = c_date.replace(tzinfo=timezone.utc)
+                        if c_date >= h_since:
+                            filtered_commits.append(c)
+                db_commits = filtered_commits
+
             alias_to_bot = {a.id: a.is_bot for a in aliases}
             alias_to_member = {a.id: str(a.member_id) if a.member_id else None for a in aliases}
 
@@ -338,8 +514,10 @@ def run_analysis(
                             "subject": c.subject or "",
                             "effective_lines": round(eff_lines, 2),
                         })
+            analysis_timings["effective_change"] = round(time.time() - t_eff_start, 3)
 
             # 5. Module ownership
+            t_own_start = time.time()
             member_module_lines: Dict[str, Dict[str, int]] = {m_id: {} for m_id in member_ids}
             for m_id in member_ids:
                 if m_id in survival_results.members:
@@ -351,8 +529,11 @@ def run_analysis(
                 total_surviving_lines=survival_results.total_surviving_lines,
                 min_module_lines=20,
             )
+            analysis_timings["ownership"] = round(time.time() - t_own_start, 3)
 
             # 6. Collaboration
+            _update_analysis_progress(db, project, "Analyzing ownership and collaboration...", 90)
+            t_collab_start = time.time()
             db_prs = db.query(PullRequest).filter(PullRequest.project_id == project.id).all()
             pr_data_list: List[PRData] = []
             for pr in db_prs:
@@ -369,8 +550,11 @@ def run_analysis(
                 member_logins=member_logins,
                 prs=pr_data_list,
             )
+            analysis_timings["collaboration"] = round(time.time() - t_collab_start, 3)
 
             # 7. Final scoring
+            _update_analysis_progress(db, project, "Calculating contribution scores...", 95)
+            t_score_start = time.time()
             raw_survival_map: Dict[str, float] = {}
             for m_id in member_ids:
                 m_data = survival_results.members.get(m_id)
@@ -494,6 +678,10 @@ def run_analysis(
                         db.add(contrib)
 
             # 10. Update analysis run stats and status
+            total_elapsed = round(time.time() - start_time, 3)
+            analysis_timings["scoring"] = round(time.time() - t_score_start, 3)
+            analysis_timings["total"] = total_elapsed
+
             run_stats = {
                 "files_total": files_total,
                 "files_analyzed": files_analyzed,
@@ -503,6 +691,8 @@ def run_analysis(
                 "commits_excluded": commits_excluded,
                 "truncated": is_truncated,
                 "project_flags": project_flags,
+                "file_survival": current_file_survival,
+                "timings": analysis_timings,
             }
 
             analysis_run.status = AnalysisRunStatus.complete
@@ -510,10 +700,19 @@ def run_analysis(
             analysis_run.stats = run_stats
             analysis_run.weights = effective_weights
 
+            # Update project timings & progress
+            p_timings = dict(project.timing_stats or {})
+            p_timings["analysis"] = analysis_timings
+            project.timing_stats = p_timings
             project.analysis_status = "complete"
             project.analysis_error = None
+            project.progress_step = "Analysis complete"
+            project.progress_percent = 100
             db.commit()
-            logger.info("Analysis completed successfully for project %s in %.2fs", project.id, time.time() - start_time)
+
+            for step_name, sec in analysis_timings.items():
+                logger.info("Timing [Analysis] %s: %.3fs", step_name, sec)
+            logger.info("Analysis completed successfully for project %s in %.2fs", project.id, total_elapsed)
 
         except Exception as e:
             db.rollback()

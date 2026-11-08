@@ -138,10 +138,12 @@ def list_project_faculty(
         {
             "id": str(a.id),
             "faculty_user_id": str(a.faculty_user_id),
+            "user_id": str(a.faculty_user_id),
             "username": a.faculty_user.username if a.faculty_user else "unknown",
             "display_name": a.faculty_user.display_name if a.faculty_user else None,
             "assigned_by": str(a.assigned_by) if a.assigned_by else None,
             "created_at": a.created_at.isoformat() if a.created_at else None,
+            "assigned_at": a.created_at.isoformat() if a.created_at else None,
         }
         for a in assignments
     ]
@@ -207,6 +209,7 @@ def list_faculty_assigned_projects(
             "open_disputes_count": open_disputes_count,
             "flags_count": flags_count,
             "created_at": p.created_at.isoformat() if p.created_at else None,
+            "assigned_at": p.created_at.isoformat() if p.created_at else None,
         })
 
     return results

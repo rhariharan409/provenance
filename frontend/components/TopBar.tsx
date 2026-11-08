@@ -1,6 +1,9 @@
-import React from "react";
+"use client";
+
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import SignOutButton from "./SignOutButton";
 
 interface TopBarProps {
@@ -9,19 +12,72 @@ interface TopBarProps {
     avatar_url?: string | null;
     role?: "student" | "faculty" | "admin" | string | null;
   };
+  pendingReviewsCount?: number;
 }
 
-export default function TopBar({ user }: TopBarProps) {
+export default function TopBar({ user, pendingReviewsCount: initialCount }: TopBarProps) {
+  const pathname = usePathname();
+  const [fetchedCount, setFetchedCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (initialCount !== undefined) {
+      return;
+    }
+    let isMounted = true;
+    fetch("/api/reviews/summary")
+      .then((res) => (res.ok ? res.json() : { pending_count: 0 }))
+      .then((data) => {
+        if (isMounted && typeof data.pending_count === "number") {
+          setFetchedCount(data.pending_count);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [initialCount]);
+
+  const count = initialCount !== undefined ? initialCount : (fetchedCount ?? 0);
+
+  const isReview = pathname.startsWith("/review");
+  const isDashboard = !isReview && (pathname === "/dashboard" || pathname.startsWith("/projects"));
+
   return (
     <header className="w-full h-[56px] border-b border-border bg-surface">
       <div className="max-w-[1120px] h-full mx-auto px-4 flex items-center justify-between">
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-8 h-full">
           <Link
             href="/dashboard"
             className="font-serif text-[18px] font-semibold text-text tracking-tight select-none hover:text-accent transition-colors"
           >
             Provenance
           </Link>
+
+          <nav className="flex items-center gap-6 h-full">
+            <Link
+              href="/dashboard"
+              className={`h-full flex items-center text-[13px] font-medium transition-colors border-b-2 pt-[2px] ${
+                isDashboard
+                  ? "border-accent text-text"
+                  : "border-transparent text-text-muted hover:text-text"
+              }`}
+            >
+              My projects
+            </Link>
+            <Link
+              href="/review"
+              className={`h-full flex items-center gap-1.5 text-[13px] font-medium transition-colors border-b-2 pt-[2px] ${
+                isReview
+                  ? "border-accent text-text"
+                  : "border-transparent text-text-muted hover:text-text"
+              }`}
+            >
+              <span>Review</span>
+              {count > 0 && (
+                <span className="text-[12px] text-text-muted font-mono">{count}</span>
+              )}
+            </Link>
+          </nav>
         </div>
 
         <div className="flex items-center gap-4">
@@ -81,4 +137,3 @@ export default function TopBar({ user }: TopBarProps) {
     </header>
   );
 }
-

@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
 import os
@@ -7,13 +8,15 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
 from app.models.projects import Project, ProjectStatus
+from app.models.commits import Commit
 from app.models.pull_requests import PullRequest, Review
 from app.models.author_aliases import AuthorAlias
 from app.services.github_client import GitHubClient, RepoAccessError
@@ -81,6 +84,16 @@ def _parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _update_project_progress(db: Session, project: Project, step: str, percent: int) -> None:
+    """Updates progress step and percent on the project without failing."""
+    try:
+        project.progress_step = step
+        project.progress_percent = percent
+        db.commit()
+    except Exception:
+        pass
 
 
 def validate_and_parse_github_url(url: str) -> Tuple[str, str, str]:
@@ -218,8 +231,12 @@ def run_collection(
                 return
 
             client = github_client or GitHubClient()
+            t_collection_start = time.time()
+            timing_summary: Dict[str, float] = {}
 
             # Step 1: Resolve Auth and verify repo metadata
+            _update_project_progress(db, project, "Verifying repository metadata...", 5)
+            t_auth_start = time.time()
             auth_res = client.resolve_auth(owner, repo)
             token = auth_res.token
             all_warnings: List[str] = list(auth_res.warnings)
@@ -258,62 +275,143 @@ def run_collection(
                 return
 
             db.commit()
+            t_auth_elapsed = time.time() - t_auth_start
+            timing_summary["auth_metadata"] = round(t_auth_elapsed, 3)
+            logger.info("Timing [Collection] auth_metadata: %.2fs", t_auth_elapsed)
 
-            # Step 2: Clone repository bare
+            # Step 2: Clone or Fetch repository bare
+            t_clone_start = time.time()
             os.makedirs(settings.REPO_STORAGE_PATH, exist_ok=True)
             clone_path = os.path.abspath(
                 os.path.join(settings.REPO_STORAGE_PATH, f"{project.id}.git")
             )
             project.clone_path = clone_path
 
-            _safe_rmtree(clone_path)
-
             temp_hooks_dir = tempfile.mkdtemp(prefix="git_empty_hooks_")
 
             clone_env = os.environ.copy()
             clone_env["GIT_TERMINAL_PROMPT"] = "0"
 
-            # For public repos where no GitHub App installation token exists, do NOT send any
-            # Authorization header to git. Clone anonymously, and use the PAT only for API calls.
-            # Only use the extraheader for GitHub App installation tokens (private repos).
             if auth_res.installation_id and token:
                 auth_header = f"Authorization: Basic {base64.b64encode(f'x-access-token:{token}'.encode()).decode()}"
                 clone_env["GIT_CONFIG_COUNT"] = "1"
                 clone_env["GIT_CONFIG_KEY_0"] = "http.extraheader"
                 clone_env["GIT_CONFIG_VALUE_0"] = auth_header
 
-            clone_cmd = [
-                "git",
-                "clone",
-                "--bare",
-                "-c",
-                f"core.hooksPath={temp_hooks_dir}",
-                "-c",
-                "protocol.file.allow=never",
-                "-c",
-                "core.fsmonitor=false",
-                "--",
-                f"https://github.com/{owner}/{repo}.git",
-                clone_path,
-            ]
+            is_incremental = bool(os.path.exists(clone_path) and os.path.exists(os.path.join(clone_path, "HEAD")))
+            clone_success = False
 
-            proc = subprocess.run(
-                clone_cmd,
-                env=clone_env,
-                capture_output=True,
-                text=True,
-                timeout=settings.CLONE_TIMEOUT_SECONDS,
-                shell=False,
-            )
+            if is_incremental:
+                _update_project_progress(db, project, "Fetching repository updates...", 15)
+                fetch_cmd = [
+                    "git",
+                    "--git-dir",
+                    clone_path,
+                    "-c",
+                    f"core.hooksPath={temp_hooks_dir}",
+                    "-c",
+                    "protocol.file.allow=never",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "fetch",
+                    "--prune",
+                    "origin",
+                    "+refs/heads/*:refs/heads/*",
+                ]
+                fetch_proc = subprocess.run(
+                    fetch_cmd,
+                    env=clone_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.CLONE_TIMEOUT_SECONDS,
+                    shell=False,
+                )
+                if fetch_proc.returncode == 0:
+                    clone_success = True
+                else:
+                    logger.warning("Incremental git fetch failed, falling back to clean clone: %s", fetch_proc.stderr[:200])
+                    is_incremental = False
+                    _safe_rmtree(clone_path)
 
-            if proc.returncode != 0:
-                project.status = ProjectStatus.failed
-                secrets_to_mask = [token, settings.GITHUB_API_TOKEN]
-                project.error_message = _sanitize_git_error(proc.stderr, secrets_to_mask)
-                db.commit()
-                return
+            if not clone_success:
+                _safe_rmtree(clone_path)
+                _update_project_progress(db, project, "Cloning repository...", 15)
+
+                # Attempt 1: Partial clone with --filter=blob:none --no-checkout --bare
+                partial_clone_cmd = [
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    "--bare",
+                    "-c",
+                    f"core.hooksPath={temp_hooks_dir}",
+                    "-c",
+                    "protocol.file.allow=never",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "--",
+                    f"https://github.com/{owner}/{repo}.git",
+                    clone_path,
+                ]
+                proc = subprocess.run(
+                    partial_clone_cmd,
+                    env=clone_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.CLONE_TIMEOUT_SECONDS,
+                    shell=False,
+                )
+
+                if proc.returncode != 0:
+                    logger.warning("Partial clone failed (%s); falling back to full bare clone", proc.stderr[:200])
+                    all_warnings.append("Server rejected partial clone (--filter=blob:none); fell back to full bare clone.")
+                    _safe_rmtree(clone_path)
+                    # Attempt 2: Fallback to standard full bare clone
+                    full_clone_cmd = [
+                        "git",
+                        "clone",
+                        "--bare",
+                        "-c",
+                        f"core.hooksPath={temp_hooks_dir}",
+                        "-c",
+                        "protocol.file.allow=never",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "--",
+                        f"https://github.com/{owner}/{repo}.git",
+                        clone_path,
+                    ]
+                    proc = subprocess.run(
+                        full_clone_cmd,
+                        env=clone_env,
+                        capture_output=True,
+                        text=True,
+                        timeout=settings.CLONE_TIMEOUT_SECONDS,
+                        shell=False,
+                    )
+
+                if proc.returncode != 0:
+                    project.status = ProjectStatus.failed
+                    secrets_to_mask = [token, settings.GITHUB_API_TOKEN]
+                    project.error_message = _sanitize_git_error(proc.stderr, secrets_to_mask)
+                    db.commit()
+                    return
+
+            t_clone_elapsed = time.time() - t_clone_start
+            timing_summary["clone_or_fetch"] = round(t_clone_elapsed, 3)
+            logger.info("Timing [Collection] clone_or_fetch: %.2fs", t_clone_elapsed)
 
             # Step 3: Read commit history locally via git log
+            _update_project_progress(db, project, "Reading commits...", 30)
+            t_log_start = time.time()
+
+            since_filter: Optional[str] = None
+            if is_incremental and project.last_collected_at:
+                since_filter = project.last_collected_at.isoformat()
+            elif project.history_since:
+                since_filter = project.history_since.isoformat()
+
             log_format = "\x1e%H\x1f%an\x1f%ae\x1f%aI\x1f%s\x1f%P"
             log_cmd = [
                 "git",
@@ -325,6 +423,8 @@ def run_collection(
                 "--numstat",
                 f"--format={log_format}",
             ]
+            if since_filter:
+                log_cmd.append(f"--since={since_filter}")
 
             log_proc = subprocess.run(
                 log_cmd,
@@ -349,16 +449,31 @@ def run_collection(
                     f"Commit count capped at maximum limit of {settings.MAX_COMMITS} commits."
                 )
 
-            # Step 4: API enrichment (commits & pull requests)
-            sha_to_login, commit_warns = client.list_commits(
-                owner, repo, token, settings.MAX_COMMITS
-            )
-            all_warnings.extend(commit_warns)
+            t_log_elapsed = time.time() - t_log_start
+            timing_summary["git_log"] = round(t_log_elapsed, 3)
+            logger.info("Timing [Collection] git_log: %.2fs", t_log_elapsed)
+            _update_project_progress(db, project, f"Reading commits {len(raw_commits)} of {len(raw_commits)}", 40)
 
-            prs_data, pr_warns = client.list_pull_requests_and_reviews(
-                owner, repo, token, settings.MAX_PULL_REQUESTS
-            )
+            # Step 4: API enrichment (commits & pull requests) concurrently
+            _update_project_progress(db, project, "Fetching pull requests & reviews...", 45)
+            t_api_start = time.time()
+
+            with ThreadPoolExecutor(max_workers=2) as api_pool:
+                future_commits = api_pool.submit(
+                    client.list_commits, owner, repo, token, settings.MAX_COMMITS
+                )
+                future_prs = api_pool.submit(
+                    client.list_pull_requests_and_reviews, owner, repo, token, settings.MAX_PULL_REQUESTS
+                )
+                sha_to_login, commit_warns = future_commits.result()
+                prs_data, pr_warns = future_prs.result()
+
+            all_warnings.extend(commit_warns)
             all_warnings.extend(pr_warns)
+
+            t_api_elapsed = time.time() - t_api_start
+            timing_summary["github_api"] = round(t_api_elapsed, 3)
+            logger.info("Timing [Collection] github_api: %.2fs", t_api_elapsed)
 
             # Save Pull Requests and Reviews
             pr_extra_logins: List[str] = []
@@ -426,7 +541,9 @@ def run_collection(
             db.flush()
 
             # Step 5: Identity resolution and DB sync
-            # Fetch existing manual assignments to preserve them
+            _update_project_progress(db, project, "Resolving identities & syncing database...", 60)
+            t_sync_start = time.time()
+
             existing_manual_aliases = (
                 db.query(AuthorAlias)
                 .filter(AuthorAlias.project_id == project.id)
@@ -455,12 +572,26 @@ def run_collection(
                 pr_extra_logins=pr_extra_logins,
             )
 
-            # Step 6: Mark project ready
+            t_sync_elapsed = time.time() - t_sync_start
+            timing_summary["identity_sync"] = round(t_sync_elapsed, 3)
+            logger.info("Timing [Collection] identity_sync: %.2fs", t_sync_elapsed)
+
+            # Step 6: Mark project ready and store timings
+            t_total_elapsed = round(time.time() - t_collection_start, 3)
+            timing_summary["total"] = t_total_elapsed
+            logger.info("Timing [Collection] total: %.2fs", t_total_elapsed)
+
+            current_timing_stats = dict(project.timing_stats) if project.timing_stats else {}
+            current_timing_stats["collection"] = timing_summary
+            project.timing_stats = current_timing_stats
+
             deduped_warnings = list(dict.fromkeys(w for w in all_warnings if w))
-            project.commit_total = len(raw_commits)
+            total_stored_commits = db.query(Commit).filter(Commit.project_id == project.id).count()
+            project.commit_total = total_stored_commits
             project.last_collected_at = datetime.now(timezone.utc)
             project.warnings = "; ".join(deduped_warnings) if deduped_warnings else None
             project.status = ProjectStatus.ready
+            _update_project_progress(db, project, "Collection complete", 70)
             db.commit()
 
             # Step 7: Run analysis and scoring engine

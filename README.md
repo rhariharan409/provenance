@@ -316,6 +316,48 @@ ORIGINALITY_WINDOW=4                                  # Winnowing window size
 - `003_scoring_schema.py`: Analysis runs and scoring tables (`analysis_runs`, `contribution_scores`).
 - `004_passport_and_disputes_schema.py`: Passports and disputes tables (`passports`, `disputes`).
 - `005_section5_schema.py`: Faculty assignments, member summaries, and originality tables (`project_faculty`, `member_summaries`, `fingerprints`, `originality_matches`).
+- `006_review_invitations.py`: Review invitation and status tables (`review_invitations`).
+- `007_performance_and_progress_schema.py`: History window, progress reporting, and timing statistics columns on `projects`.
+
+---
+
+## Section 7: Performance Optimizations & Progress Reporting
+
+Section 7 introduces comprehensive performance optimizations across collection and analysis, real-time granular progress reporting, and timing metrics:
+
+### Key Enhancements
+
+1. **Partial Clones with Graceful Fallback**:
+   - Clones bare repositories with `--filter=blob:none --no-checkout --bare` to eliminate upfront blob downloads.
+   - Preserves `git log --numstat` and `git blame` functionality by fetching blobs on demand.
+   - Automatically catches server rejections and falls back seamlessly to standard full bare clone with a recorded notice.
+
+2. **Parallel Blame Worker Pool & In-Memory Cache**:
+   - Blame operations are executed concurrently with a bounded worker pool (`ANALYSIS_WORKERS=4`).
+   - Blame output is cached in-memory keyed by `(blob_sha, path)` per analysis run to avoid redundant subprocess invocations.
+   - Non-analyzable files (binaries, lockfiles, generated assets) are pre-filtered before any git command is issued.
+
+3. **GraphQL & Concurrent API Ingestion**:
+   - Pull requests and nested reviews are fetched concurrently with `GITHUB_CONCURRENCY=5`.
+   - When a GitHub token is provided, a consolidated GraphQL query retrieves PRs and reviews in a single paginated stream, falling back to concurrent REST calls when necessary.
+
+4. **Incremental Collection & Analysis**:
+   - Existing bare repositories utilize `git fetch` instead of re-cloning from scratch.
+   - Incremental collections restrict git log processing to commits newer than `last_collected_at`.
+   - Subsequent analysis runs compute `git diff --name-only` between the previous and current `head_sha`, re-blaming only modified files and reusing cached line survival results for unchanged files.
+
+5. **Configurable History Window**:
+   - Project creation supports selecting commit history windows (`all`, `12m`, `6m`) to limit the commit volume read and analyzed.
+   - Contribution scores clearly display notes indicating the active analysis timeline (`Analyzed commits since <date>`).
+
+6. **Granular Progress Reporting**:
+   - Tracks `progress_step` and `progress_percent` on projects throughout collection and analysis.
+   - Real-time status polling displays live steps in the user interface (e.g. `"Cloning repository (partial)..."`, `"Reading commits..."`, `"Blaming files 120 of 800"`).
+
+7. **Per-Step Timing Logging & UI Telemetry**:
+   - Tracks durations for every phase (`auth_metadata`, `clone_or_fetch`, `git_log`, `github_api`, `identity_sync`, `list_files`, `git_blame`, `effective_change`, `ownership`, `collaboration`, `scoring`, `total`).
+   - Persists timing summaries in `project.timing_stats` and `analysis_run.stats["timings"]` for auditable inspection in the UI.
+
 
 
 

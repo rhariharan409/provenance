@@ -1,4 +1,5 @@
 import { BACKEND_URL } from "./config";
+export { formatDate, formatDateTime } from "./date";
 
 export interface UserProfile {
   id: string;
@@ -32,6 +33,11 @@ export interface ProjectDetail extends ProjectSummary {
   error_message: string | null;
   members_count: number;
   prs_count: number;
+  history_window?: string | null;
+  history_since?: string | null;
+  progress_step?: string | null;
+  progress_percent?: number | null;
+  timing_stats?: Record<string, unknown> | null;
 }
 
 export interface MemberAlias {
@@ -100,6 +106,9 @@ export interface ProjectScoresResponse {
   stats: Record<string, unknown>;
   project_flags: Array<{ code: string; message: string }>;
   members: MemberScoreItem[];
+  history_window?: string | null;
+  history_since?: string | null;
+  timing_stats?: Record<string, unknown> | null;
 }
 
 export interface MemberEvidenceResponse {
@@ -118,6 +127,8 @@ export interface MemberEvidenceResponse {
 export interface AnalysisStatusResponse {
   analysis_status: string;
   analysis_error: string | null;
+  progress_step?: string | null;
+  progress_percent?: number | null;
 }
 
 /**
@@ -251,7 +262,10 @@ export async function getProjectDetail(
 /**
  * Submits a new project repository URL.
  */
-export async function createProject(repo_url: string): Promise<{
+export async function createProject(
+  repo_url: string,
+  history_window?: string
+): Promise<{
   ok: boolean;
   status: number;
   data?: Record<string, unknown>;
@@ -260,13 +274,17 @@ export async function createProject(repo_url: string): Promise<{
   install_url?: string;
 }> {
   try {
+    const payload: { repo_url: string; history_window?: string } = { repo_url };
+    if (history_window && history_window !== "all") {
+      payload.history_window = history_window;
+    }
     const response = await fetch("/api/projects", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ repo_url }),
+      body: JSON.stringify(payload),
     });
 
     const body = await response.json();
@@ -797,50 +815,78 @@ export interface AdminUserItem {
 
 export interface ProjectFacultyItem {
   id: string;
-  user_id: string;
-  username: string;
-  display_name: string | null;
-  avatar_url: string | null;
-  assigned_at: string;
-  assigned_by: string;
+  user_id?: string;
+  faculty_user_id?: string;
+  username?: string;
+  invitee_username?: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  status?: string;
+  assigned_at?: string | null;
+  created_at?: string | null;
+  responded_at?: string | null;
+  assigned_by?: string | null;
 }
 
 export interface FacultyProjectItem {
   id: string;
   name: string;
   repo_full_name: string;
-  repo_url: string;
-  owner_id: string;
-  created_at: string;
-  members_count: number;
+  repo_url?: string;
+  owner_id?: string;
+  created_at?: string | null;
+  assigned_at?: string | null;
+  member_count?: number;
+  members_count?: number;
   open_disputes_count: number;
   flags_count: number;
-  assigned_at: string;
+  status: string;
+}
+
+export interface CitationItem {
+  sha?: string;
+  sha_short?: string;
+  claim?: string;
 }
 
 export interface MemberSummaryItem {
   id: string;
-  run_id: string;
+  run_id?: string;
   member_id: string;
-  method: "llm" | "rule_based";
-  summary_text: string;
-  citations: string[];
-  generated_at: string;
-  disclaimer: string;
+  member?: string;
+  member_name?: string;
+  method?: "llm" | "rule_based" | string;
+  text?: string;
+  summary_text?: string;
+  citations?: Array<string | CitationItem>;
+  created_at?: string | null;
+  generated_at?: string | null;
+  disclaimer?: string;
 }
 
 export interface OriginalityMatchItem {
   id?: string;
   other_project_id?: string;
   other_project_name?: string;
+  other_repo_full_name?: string;
   shared_fingerprints?: number;
   shared_lines_estimate?: number;
-  top_files?: Array<{ file: string; other_file: string; count: number }>;
+  top_files?: Array<{
+    file?: string;
+    other_file?: string;
+    path?: string;
+    other_path?: string;
+    count?: number;
+  }>;
+  created_at?: string | null;
 }
 
 export interface OriginalityResponse {
+  status?: string;
+  heading?: string;
   matches: OriginalityMatchItem[];
   external_similarity_flag?: boolean;
+  external_similarity_count?: number;
   external_match_count?: number;
   threshold_lines: number;
   disclaimer: string;
@@ -864,7 +910,10 @@ export async function getAdminUsers(
     if (Array.isArray(data)) {
       return { users: data, total: data.length };
     }
-    return data;
+    return {
+      users: Array.isArray(data?.users) ? data.users : [],
+      total: typeof data?.total === "number" ? data.total : (data?.users?.length || 0),
+    };
   } catch {
     return { users: [], total: 0 };
   }
@@ -971,9 +1020,17 @@ export function getExportCsvUrl(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}/export.csv`;
 }
 
+export interface ProjectSummariesResult extends Array<MemberSummaryItem> {
+  ok?: boolean;
+  status?: number;
+  needs_analysis?: boolean;
+  error?: string;
+  summaries?: MemberSummaryItem[];
+}
+
 export async function generateProjectSummaries(
   projectId: string
-): Promise<{ ok: boolean; count?: number; error?: string }> {
+): Promise<{ ok: boolean; count?: number; message?: string; error?: string; status?: number; needs_analysis?: boolean }> {
   try {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/summaries/generate`, {
       method: "POST",
@@ -981,25 +1038,56 @@ export async function generateProjectSummaries(
     });
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
-      return { ok: true, count: data.count };
+      return { ok: true, count: Array.isArray(data) ? data.length : data.count, message: data.message };
     }
-    return { ok: false, error: data.detail || "Failed to generate summaries." };
+    const statusMsg = response.status ? ` (status ${response.status})` : "";
+    const detailMsg = data.detail || "";
+    const isNeedsAnalysis = detailMsg.toLowerCase().includes("analysis") || response.status === 400;
+    return {
+      ok: false,
+      status: response.status,
+      needs_analysis: isNeedsAnalysis,
+      error: detailMsg ? `${detailMsg}${response.status >= 500 ? statusMsg : ""}` : `Could not generate summaries (status ${response.status})`,
+    };
   } catch {
-    return { ok: false, error: "Network error generating summaries." };
+    return { ok: false, status: 500, error: "Could not generate summaries (status 500)" };
   }
 }
 
-export async function getProjectSummaries(projectId: string): Promise<MemberSummaryItem[]> {
+export async function getProjectSummaries(projectId: string): Promise<ProjectSummariesResult> {
   try {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/summaries`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
     });
-    if (!response.ok) return [];
-    return await response.json();
+    if (!response.ok) {
+      const errList = [] as ProjectSummariesResult;
+      errList.ok = false;
+      errList.status = response.status;
+      errList.error = `Could not load summaries (status ${response.status})`;
+      return errList;
+    }
+    const data = await response.json().catch(() => ({}));
+    const needsAnalysis = Boolean(
+      (data && typeof data === "object" && !Array.isArray(data) && data.needs_analysis) ||
+      response.headers.get("x-needs-analysis") === "true"
+    );
+    const rawItems: MemberSummaryItem[] = Array.isArray(data)
+      ? data
+      : (data && Array.isArray(data.summaries) ? data.summaries : []);
+
+    const resultList = [...rawItems] as ProjectSummariesResult;
+    resultList.ok = true;
+    resultList.status = response.status;
+    resultList.needs_analysis = needsAnalysis;
+    return resultList;
   } catch {
-    return [];
+    const errList = [] as ProjectSummariesResult;
+    errList.ok = false;
+    errList.status = 500;
+    errList.error = "Could not load summaries (status 500)";
+    return errList;
   }
 }
 
@@ -1018,6 +1106,22 @@ export async function runOriginalityCheck(
     return { ok: false, error: data.detail || "Failed to run originality check." };
   } catch {
     return { ok: false, error: "Network error running originality check." };
+  }
+}
+
+export async function getOriginalityAvailability(
+  projectId: string
+): Promise<{ available: boolean }> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/originality/availability`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return { available: false };
+    return await response.json();
+  } catch {
+    return { available: false };
   }
 }
 
@@ -1060,6 +1164,184 @@ export async function deleteMyAccount(confirmText: string): Promise<{ ok: boolea
     return { ok: false, error: data.detail || "Failed to delete account." };
   } catch {
     return { ok: false, error: "Network error deleting account." };
+  }
+}
+
+export interface ReviewSummaryResponse {
+  pending_count: number;
+}
+
+export interface ReviewInvitationItem {
+  id: string;
+  project_id: string;
+  project_name: string;
+  repo_name: string;
+  repo_full_name: string;
+  invited_by: string;
+  created_at: string | null;
+  status: "pending" | "accepted" | "declined";
+}
+
+export interface ReviewedProjectItem {
+  id: string;
+  name: string;
+  repo_name: string;
+  repo_full_name: string;
+  status: string;
+  member_count: number;
+  open_disputes_count: number;
+  flags_count: number;
+  accepted_at: string | null;
+  created_at: string | null;
+}
+
+export interface ProjectReviewerItem {
+  id: string;
+  invitee_username: string;
+  status: "pending" | "accepted" | "declined";
+  created_at: string | null;
+  responded_at?: string | null;
+  type?: string;
+  role?: string;
+  assigned_by?: string | null;
+}
+
+export async function getReviewsSummary(cookieHeader?: string): Promise<ReviewSummaryResponse> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (cookieHeader) headers["Cookie"] = cookieHeader;
+    const url = cookieHeader ? `${BACKEND_URL}/reviews/summary` : "/api/reviews/summary";
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return { pending_count: 0 };
+    return await res.json();
+  } catch {
+    return { pending_count: 0 };
+  }
+}
+
+export async function getMyReviewInvitations(cookieHeader?: string): Promise<ReviewInvitationItem[]> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (cookieHeader) headers["Cookie"] = cookieHeader;
+    const url = cookieHeader ? `${BACKEND_URL}/reviews/invitations` : "/api/reviews/invitations";
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function acceptReviewInvitation(invitationId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/reviews/invitations/${encodeURIComponent(invitationId)}/accept`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    if (res.ok) return { ok: true };
+    const err = await res.json().catch(() => ({}));
+    return { ok: false, error: err.detail || "Failed to accept invitation." };
+  } catch {
+    return { ok: false, error: "Network error accepting invitation." };
+  }
+}
+
+export async function declineReviewInvitation(invitationId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/reviews/invitations/${encodeURIComponent(invitationId)}/decline`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    if (res.ok) return { ok: true };
+    const err = await res.json().catch(() => ({}));
+    return { ok: false, error: err.detail || "Failed to decline invitation." };
+  } catch {
+    return { ok: false, error: "Network error declining invitation." };
+  }
+}
+
+export async function getReviewedProjects(cookieHeader?: string): Promise<ReviewedProjectItem[]> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (cookieHeader) headers["Cookie"] = cookieHeader;
+    const url = cookieHeader ? `${BACKEND_URL}/reviews/projects` : "/api/reviews/projects";
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function leaveReviewedProject(projectId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/reviews/projects/${encodeURIComponent(projectId)}/leave`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    if (res.ok) return { ok: true };
+    const err = await res.json().catch(() => ({}));
+    return { ok: false, error: err.detail || "Failed to leave review." };
+  } catch {
+    return { ok: false, error: "Network error leaving review." };
+  }
+}
+
+export async function inviteProjectReviewer(
+  projectId: string,
+  username: string
+): Promise<{ ok: boolean; error?: string; reviewer?: ProjectReviewerItem }> {
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/reviewers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ username }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      return { ok: true, reviewer: data.reviewer };
+    }
+    return { ok: false, error: data.detail || "Failed to invite reviewer." };
+  } catch {
+    return { ok: false, error: "Network error inviting reviewer." };
+  }
+}
+
+export async function getProjectReviewers(
+  projectId: string,
+  cookieHeader?: string
+): Promise<ProjectReviewerItem[]> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (cookieHeader) headers["Cookie"] = cookieHeader;
+    const url = cookieHeader
+      ? `${BACKEND_URL}/projects/${encodeURIComponent(projectId)}/reviewers`
+      : `/api/projects/${encodeURIComponent(projectId)}/reviewers`;
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function removeProjectReviewer(
+  projectId: string,
+  reviewerId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/reviewers/${encodeURIComponent(reviewerId)}`,
+      {
+        method: "DELETE",
+        headers: { Accept: "application/json" },
+      }
+    );
+    if (res.ok) return { ok: true };
+    const err = await res.json().catch(() => ({}));
+    return { ok: false, error: err.detail || "Failed to remove reviewer." };
+  } catch {
+    return { ok: false, error: "Network error removing reviewer." };
   }
 }
 

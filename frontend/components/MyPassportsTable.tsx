@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { UserPassportItem, revokePassport } from "@/lib/api";
+import { formatDateTime } from "@/lib/date";
 
 interface MyPassportsTableProps {
   initialPassports: UserPassportItem[];
@@ -80,12 +81,7 @@ export default function MyPassportsTable({ initialPassports }: MyPassportsTableP
             </thead>
             <tbody className="divide-y divide-border">
               {passports.map((p) => {
-                const createdStr = p.created_at
-                  ? new Date(p.created_at)
-                      .toISOString()
-                      .replace("T", " ")
-                      .replace(/\..+/, "")
-                  : "—";
+                const createdStr = formatDateTime(p.created_at);
 
                 let disputeStatusStr = "No disputes";
                 if (p.dispute_summary.open > 0) {

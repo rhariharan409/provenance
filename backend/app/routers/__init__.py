@@ -10,6 +10,7 @@ from app.routers.export import router as export_router
 from app.routers.summaries import router as summaries_router
 from app.routers.originality import router as originality_router
 from app.routers.account import router as account_router
+from app.routers.reviews import router as reviews_router
 
 __all__ = [
     "health_router",
@@ -24,4 +25,5 @@ __all__ = [
     "summaries_router",
     "originality_router",
     "account_router",
+    "reviews_router",
 ]

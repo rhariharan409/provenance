@@ -29,8 +29,18 @@ export default async function PassportPage({ params }: PassportPageProps) {
     );
   }
 
-  const { snapshot, seal, seal_version, created_at, dispute_summary } = passport;
-  const { project, member, score, signals, evidence, team, notes } = snapshot;
+  const snapshot = passport?.snapshot;
+  const project = snapshot?.project;
+  const member = snapshot?.member;
+  const score = snapshot?.score;
+  const signals = snapshot?.signals;
+  const evidence = snapshot?.evidence;
+  const team = Array.isArray(snapshot?.team) ? snapshot.team : [];
+  const notes = snapshot?.notes;
+  const seal = passport?.seal || "";
+  const seal_version = passport?.seal_version || "v1";
+  const created_at = passport?.created_at;
+  const dispute_summary = passport?.dispute_summary || { open: 0, resolved: 0, rejected: 0, total: 0 };
 
   // Format dispute line
   let disputeLine = "No disputes";
@@ -98,7 +108,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
                 Analysis: <span className="font-mono">{analysisDateStr}</span>
               </div>
               <div>
-                HEAD: <span className="font-mono">{project.head_sha?.slice(0, 7)}</span>
+                HEAD: <span className="font-mono">{typeof project?.head_sha === "string" && project.head_sha.length >= 7 ? project.head_sha.slice(0, 7) : (project?.head_sha || "—")}</span>
               </div>
             </div>
           </header>
@@ -110,7 +120,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
                 Contribution Share
               </span>
               <span className="font-mono text-4xl font-semibold text-text tabular-nums">
-                {score.share_percent.toFixed(2)}%
+                {Number(score?.share_percent || 0).toFixed(2)}%
               </span>
             </div>
 
@@ -119,18 +129,18 @@ export default async function PassportPage({ params }: PassportPageProps) {
                 <span className="text-[13px] text-text-muted">Confidence:</span>
                 <span
                   className={`text-[12px] px-2 py-0.5 rounded-[4px] border font-medium uppercase tracking-wide ${
-                    score.confidence === "high"
+                    score?.confidence === "high"
                       ? "border-success text-success bg-[#2F6B3A]/10"
-                      : score.confidence === "medium"
+                      : score?.confidence === "medium"
                       ? "border-warning text-warning bg-[#8A5A00]/10"
                       : "border-border-strong text-text-muted bg-surface"
-                  }`}
+                    }`}
                 >
-                  {score.confidence}
+                  {score?.confidence || "unknown"}
                 </span>
               </div>
 
-              {score.flags && score.flags.length > 0 && (
+              {Array.isArray(score?.flags) && score.flags.length > 0 && (
                 <div className="flex flex-col gap-1 mt-1">
                   {score.flags.map((f, i) => (
                     <div key={i} className="text-[12px] text-warning flex items-start gap-1">
@@ -219,7 +229,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
               </h2>
 
               {/* Top Commits */}
-              {evidence.top_commits && evidence.top_commits.length > 0 && (
+              {Array.isArray(evidence?.top_commits) && evidence.top_commits.length > 0 && (
                 <div className="mb-4">
                   <h3 className="text-[13px] font-medium text-text mb-2">
                     Key Commits (effective change)
@@ -234,30 +244,33 @@ export default async function PassportPage({ params }: PassportPageProps) {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border">
-                        {evidence.top_commits.map((c, i) => (
-                          <tr key={i}>
-                            <td className="py-2 px-3 font-mono text-[12px]">
-                              {c.github_url ? (
-                                <a
-                                  href={c.github_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-accent hover:underline"
-                                >
-                                  {c.sha_short}
-                                </a>
-                              ) : (
-                                c.sha_short
-                              )}
-                            </td>
-                            <td className="py-2 px-3 text-text truncate max-w-[280px]">
-                              {c.subject}
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono text-text-muted">
-                              +{c.effective_lines.toFixed(1)}
-                            </td>
-                          </tr>
-                        ))}
+                        {evidence.top_commits.map((c, i) => {
+                          const shaShort = c.sha_short || (typeof c.sha === "string" && c.sha.length >= 7 ? c.sha.slice(0, 7) : "—");
+                          return (
+                            <tr key={i}>
+                              <td className="py-2 px-3 font-mono text-[12px]">
+                                {c.github_url ? (
+                                  <a
+                                    href={c.github_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-accent hover:underline"
+                                  >
+                                    {shaShort}
+                                  </a>
+                                ) : (
+                                  shaShort
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-text truncate max-w-[280px]">
+                                {c.subject || "Untitled commit"}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono text-text-muted">
+                                +{Number(c.effective_lines || 0).toFixed(1)}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -266,7 +279,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
 
               {/* Top Files & Owned Modules */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {evidence.top_files && evidence.top_files.length > 0 && (
+                {Array.isArray(evidence?.top_files) && evidence.top_files.length > 0 && (
                   <div>
                     <h3 className="text-[13px] font-medium text-text mb-2">
                       Surviving Files
@@ -286,7 +299,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
                   </div>
                 )}
 
-                {evidence.owned_modules && evidence.owned_modules.length > 0 && (
+                {Array.isArray(evidence?.owned_modules) && evidence.owned_modules.length > 0 && (
                   <div>
                     <h3 className="text-[13px] font-medium text-text mb-2">
                       Module Ownership
@@ -298,7 +311,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
                             {m.module || m.path}
                           </span>
                           <span className="font-mono text-[12px] text-accent shrink-0">
-                            {(m.share * 100).toFixed(0)}% share
+                            {(Number(m.share || 0) * 100).toFixed(0)}% share
                           </span>
                         </div>
                       ))}

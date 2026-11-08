@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE_KB: int = 400
     ANALYSIS_TIMEOUT_SECONDS: int = 900
     BULK_COMMIT_LINE_CAP: int = 1500
+    ANALYSIS_WORKERS: int = 4
+    GITHUB_CONCURRENCY: int = 5
 
     # Section 4 settings
     PASSPORT_SIGNING_SECRET: Optional[str] = None

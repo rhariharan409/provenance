@@ -11,7 +11,7 @@ from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
 from app.models.originality import OriginalityMatch
 from app.models.projects import Project
 from app.models.users import User, UserRole
-from app.services.auth_access import check_project_read_access, check_project_write_access, is_faculty_or_admin_on_project
+from app.services.auth_access import check_project_read_access, check_project_write_access, is_reviewer_on_project
 from app.services.originality import (
     ORIGINALITY_DISCLAIMER,
     compute_originality_matches,
@@ -60,6 +60,32 @@ def run_originality_check(
     }
 
 
+@router.get("/{id}/originality/availability")
+def get_originality_availability(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, bool]:
+    """
+    Checks if there are other projects in the database owned by a different user
+    for comparison, without exposing any project names or user identities.
+    """
+    project = db.query(Project).filter(Project.id == id).first()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+
+    check_project_read_access(project, current_user, db)
+
+    # Check if there is at least one project owned by a different user
+    other_exists = (
+        db.query(Project.id)
+        .filter(Project.owner_id != project.owner_id)
+        .first()
+        is not None
+    )
+    return {"available": other_exists}
+
+
 @router.get("/{id}/originality")
 def get_originality_matches(
     id: uuid.UUID,
@@ -76,7 +102,7 @@ def get_originality_matches(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
-    is_privileged = is_faculty_or_admin_on_project(project, current_user, db)
+    is_privileged = is_reviewer_on_project(project, current_user, db)
 
     latest_run = (
         db.query(AnalysisRun)

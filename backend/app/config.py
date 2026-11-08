@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List, Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +36,32 @@ class Settings(BaseSettings):
     MAX_PULL_REQUESTS: int = 300
     CLONE_TIMEOUT_SECONDS: int = 600
     MAX_PROJECTS_PER_USER: int = 20
+
+    # Section 3 settings
+    SCORE_WEIGHT_SURVIVAL: float = 0.40
+    SCORE_WEIGHT_EFFECTIVE_CHANGE: float = 0.25
+    SCORE_WEIGHT_OWNERSHIP: float = 0.15
+    SCORE_WEIGHT_COLLABORATION: float = 0.20
+    MAX_BLAME_FILES: int = 1500
+    MAX_FILE_SIZE_KB: int = 400
+    ANALYSIS_TIMEOUT_SECONDS: int = 900
+    BULK_COMMIT_LINE_CAP: int = 1500
+
+    @model_validator(mode="after")
+    def validate_and_normalize_weights(self):
+        w_surv = self.SCORE_WEIGHT_SURVIVAL
+        w_eff = self.SCORE_WEIGHT_EFFECTIVE_CHANGE
+        w_own = self.SCORE_WEIGHT_OWNERSHIP
+        w_collab = self.SCORE_WEIGHT_COLLABORATION
+        if any(w < 0 for w in [w_surv, w_eff, w_own, w_collab]):
+            raise ValueError("Score weights must be non-negative")
+        total = w_surv + w_eff + w_own + w_collab
+        if total > 0:
+            self.SCORE_WEIGHT_SURVIVAL = round(w_surv / total, 6)
+            self.SCORE_WEIGHT_EFFECTIVE_CHANGE = round(w_eff / total, 6)
+            self.SCORE_WEIGHT_OWNERSHIP = round(w_own / total, 6)
+            self.SCORE_WEIGHT_COLLABORATION = round(w_collab / total, 6)
+        return self
 
     @property
     def is_production(self) -> bool:

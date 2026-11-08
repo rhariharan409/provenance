@@ -61,6 +61,10 @@ class Project(Base):
     commit_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_collected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Section 3 columns
+    analysis_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    analysis_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     owner = relationship("User", backref="projects")
 
     __table_args__ = (

@@ -459,6 +459,13 @@ def run_collection(
             project.status = ProjectStatus.ready
             db.commit()
 
+            # Step 7: Run analysis and scoring engine
+            try:
+                from app.services.analysis.runner import run_analysis
+                run_analysis(project_id=project.id, db_factory=db_factory)
+            except Exception as analysis_err:
+                logger.warning("Analysis step failed for project %s: %s", project_id, analysis_err)
+
         except subprocess.TimeoutExpired:
             db.rollback()
             project = db.query(Project).filter(Project.id == project_id).first()

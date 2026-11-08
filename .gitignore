@@ -34,3 +34,7 @@ Thumbs.db
 backend/data/
 backend/secrets/
 *.pem
+
+# Section 3 tooling
+ground_truth.json
+

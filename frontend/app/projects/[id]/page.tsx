@@ -8,6 +8,8 @@ import {
   MemberDetail,
   UnlinkedAlias,
   CommitItem,
+  ProjectScoresResponse,
+  MemberEvidenceResponse,
   getProjectDetail,
   getProjectMembers,
   getProjectUnlinkedAliases,
@@ -16,6 +18,10 @@ import {
   deleteProject,
   assignAlias,
   mergeMembers,
+  getProjectScores,
+  getMemberEvidence,
+  getAnalysisStatus,
+  triggerAnalysis,
 } from "@/lib/api";
 
 export default function ProjectDetailPage() {
@@ -27,6 +33,13 @@ export default function ProjectDetailPage() {
   const [members, setMembers] = useState<MemberDetail[]>([]);
   const [unlinkedAliases, setUnlinkedAliases] = useState<UnlinkedAlias[]>([]);
   const [commits, setCommits] = useState<CommitItem[]>([]);
+  const [scores, setScores] = useState<ProjectScoresResponse | null>(null);
+  const [analysisStatus, setAnalysisStatus] = useState<string>("pending");
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [expandedMember, setExpandedMember] = useState<string | null>(null);
+  const [memberEvidences, setMemberEvidences] = useState<Record<string, MemberEvidenceResponse>>({});
+  const [evidenceLoading, setEvidenceLoading] = useState<Record<string, boolean>>({});
+
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -47,77 +60,87 @@ export default function ProjectDetailPage() {
     setProject(proj);
 
     if (proj.status === "ready") {
-      const [mems, aliases, cms] = await Promise.all([
+      const [mems, aliases, cms, statusRes, scoreRes] = await Promise.all([
         getProjectMembers(id),
         getProjectUnlinkedAliases(id),
         getProjectCommits(id, 50, 0),
+        getAnalysisStatus(id),
+        getProjectScores(id),
       ]);
       setMembers(mems);
       setUnlinkedAliases(aliases);
       setCommits(cms);
+      if (statusRes) {
+        setAnalysisStatus(statusRes.analysis_status);
+        setAnalysisError(statusRes.analysis_error);
+      }
+      if (scoreRes) {
+        setScores(scoreRes);
+      }
     }
     setLoading(false);
   }, [id, router]);
 
   useEffect(() => {
-    let active = true;
-
     async function fetchData() {
       if (!id) return;
-      const proj = await getProjectDetail(id);
-      if (!active) return;
-      if (!proj) {
-        router.push("/");
-        return;
-      }
-      setProject(proj);
-
-      if (proj.status === "ready") {
-        const [mems, aliases, cms] = await Promise.all([
-          getProjectMembers(id),
-          getProjectUnlinkedAliases(id),
-          getProjectCommits(id, 50, 0),
-        ]);
-        if (!active) return;
-        setMembers(mems);
-        setUnlinkedAliases(aliases);
-        setCommits(cms);
-      }
-      setLoading(false);
+      await loadData();
     }
 
     void fetchData();
+  }, [id, loadData]);
 
-    return () => {
-      active = false;
-    };
-  }, [id, router]);
-
-  // Polling while pending or analyzing
+  // Polling while collection or analysis is running
   useEffect(() => {
-    if (!project || (project.status !== "pending" && project.status !== "analyzing")) {
+    const isCollecting = project && (project.status === "pending" || project.status === "analyzing");
+    const isAnalyzing = analysisStatus === "running";
+
+    if (!isCollecting && !isAnalyzing) {
       return;
     }
 
     const interval = setInterval(async () => {
-      const updated = await getProjectDetail(id);
-      if (updated) {
-        setProject(updated);
-        if (updated.status === "ready") {
-          const [mems, aliases, cms] = await Promise.all([
-            getProjectMembers(id),
-            getProjectUnlinkedAliases(id),
-            getProjectCommits(id, 50, 0),
-          ]);
-          setMembers(mems);
-          setUnlinkedAliases(aliases);
-          setCommits(cms);
+      if (isCollecting) {
+        const updated = await getProjectDetail(id);
+        if (updated) {
+          setProject(updated);
+          if (updated.status === "ready") {
+            const [mems, aliases, cms, statusRes, scoreRes] = await Promise.all([
+              getProjectMembers(id),
+              getProjectUnlinkedAliases(id),
+              getProjectCommits(id, 50, 0),
+              getAnalysisStatus(id),
+              getProjectScores(id),
+            ]);
+            setMembers(mems);
+            setUnlinkedAliases(aliases);
+            setCommits(cms);
+            if (statusRes) {
+              setAnalysisStatus(statusRes.analysis_status);
+              setAnalysisError(statusRes.analysis_error);
+            }
+            if (scoreRes) {
+              setScores(scoreRes);
+            }
+          }
+        }
+      } else if (isAnalyzing) {
+        const statusRes = await getAnalysisStatus(id);
+        if (statusRes) {
+          setAnalysisStatus(statusRes.analysis_status);
+          setAnalysisError(statusRes.analysis_error);
+          if (statusRes.analysis_status === "complete") {
+            const scoreRes = await getProjectScores(id);
+            if (scoreRes) {
+              setScores(scoreRes);
+            }
+          }
         }
       }
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [id, project]);
+  }, [id, project, analysisStatus]);
 
   const handleRecollect = async () => {
     if (actionLoading) return;
@@ -125,6 +148,30 @@ export default function ProjectDetailPage() {
     await recollectProject(id);
     await loadData();
     setActionLoading(false);
+  };
+
+  const handleReanalyze = async () => {
+    if (actionLoading || analysisStatus === "running") return;
+    setActionLoading(true);
+    setAnalysisStatus("running");
+    await triggerAnalysis(id);
+    setActionLoading(false);
+  };
+
+  const toggleExpandMember = async (memberId: string) => {
+    if (expandedMember === memberId) {
+      setExpandedMember(null);
+      return;
+    }
+    setExpandedMember(memberId);
+    if (!memberEvidences[memberId]) {
+      setEvidenceLoading((prev) => ({ ...prev, [memberId]: true }));
+      const ev = await getMemberEvidence(id, memberId);
+      if (ev) {
+        setMemberEvidences((prev) => ({ ...prev, [memberId]: ev }));
+      }
+      setEvidenceLoading((prev) => ({ ...prev, [memberId]: false }));
+    }
   };
 
   const handleDelete = async () => {
@@ -303,6 +350,313 @@ export default function ProjectDetailPage() {
                 Last collected: <span className="tabular-nums text-text">{lastCollectedStr}</span>
               </span>
             </div>
+
+            {/* 1.5) Contribution Scores Section */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
+                  Contribution Scores
+                </h2>
+                {analysisStatus !== "running" && (
+                  <button
+                    type="button"
+                    onClick={handleReanalyze}
+                    disabled={actionLoading}
+                    className="btn-secondary text-[12px] h-[30px] px-2.5"
+                  >
+                    Re-run analysis
+                  </button>
+                )}
+              </div>
+
+              {/* While analysis is running */}
+              {analysisStatus === "running" && (
+                <div className="bg-surface border border-border rounded-[6px] p-6 text-center">
+                  <p className="text-text font-medium text-[14px] mb-1">
+                    Analyzing contributions...
+                  </p>
+                  <p className="text-text-muted text-[12px]">
+                    Computing survival, effective lines, module ownership and collaboration. This page will update automatically.
+                  </p>
+                </div>
+              )}
+
+              {/* If analysis failed */}
+              {analysisStatus === "failed" && (
+                <div className="bg-surface border border-danger rounded-[6px] p-4 text-[13px]">
+                  <p className="text-danger font-medium mb-1">Analysis failed</p>
+                  <p className="text-text-muted mb-3">{analysisError || "An error occurred during scoring."}</p>
+                  <button
+                    type="button"
+                    onClick={handleReanalyze}
+                    disabled={actionLoading}
+                    className="btn-primary text-[12px] h-[30px]"
+                  >
+                    Retry analysis
+                  </button>
+                </div>
+              )}
+
+              {/* If complete */}
+              {analysisStatus === "complete" && scores && (
+                <>
+                  {/* Notice block for project-level flags */}
+                  {scores.project_flags && scores.project_flags.length > 0 && (
+                    <div className="bg-surface border border-border rounded-[4px] p-3 space-y-1.5 text-[12px]">
+                      <span className="font-semibold text-text uppercase tracking-wider text-[11px] block text-text-muted">
+                        Analysis Notices
+                      </span>
+                      {scores.project_flags.map((f) => (
+                        <div key={f.code} className="text-text flex items-start gap-2">
+                          <span className="font-mono text-[11px] text-text-muted border border-border px-1.5 py-0.5 rounded-[2px] bg-bg shrink-0">
+                            {f.code}
+                          </span>
+                          <span>{f.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Scores Table */}
+                  <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-sm">
+                        <thead>
+                          <tr className="border-b border-border bg-bg/50">
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                              Contributor
+                            </th>
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right w-[110px]">
+                              Share
+                            </th>
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider w-[180px]">
+                              Distribution
+                            </th>
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-center w-[100px]">
+                              Confidence
+                            </th>
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                              Flags
+                            </th>
+                            <th className="py-2.5 px-4 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
+                              Details
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {scores.members.map((m) => {
+                            const isExpanded = expandedMember === m.member_id;
+                            const ev = memberEvidences[m.member_id];
+                            const isEvLoading = evidenceLoading[m.member_id];
+
+                            return (
+                              <React.Fragment key={m.member_id}>
+                                <tr className="hover:bg-bg/40 transition-colors duration-120">
+                                  <td className="py-3 px-4">
+                                    {m.display_name && (
+                                      <div className="font-medium text-text text-[13px] leading-tight">
+                                        {m.display_name}
+                                      </div>
+                                    )}
+                                    <div className="font-mono text-[12px] text-text-muted">
+                                      {m.github_login ? `@${m.github_login}` : "Unlinked"}
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-4 text-right font-mono text-[13px] font-semibold text-text tabular-nums">
+                                    {m.share_percent.toFixed(2)}%
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <div className="w-full bg-bg border border-border h-2.5 rounded-[2px] overflow-hidden">
+                                      <div
+                                        className="bg-accent h-full"
+                                        style={{ width: `${Math.min(Math.max(m.share_percent, 0), 100)}%` }}
+                                      />
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-4 text-center">
+                                    <span className="font-mono text-[11px] border border-border px-2 py-0.5 rounded-[4px] capitalize text-text">
+                                      {m.confidence}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <div className="flex flex-wrap gap-1">
+                                      {m.flags.length > 0 ? (
+                                        m.flags.map((fl) => (
+                                          <span
+                                            key={fl}
+                                            className="font-mono text-[11px] border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted"
+                                          >
+                                            {fl}
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span className="text-[12px] text-text-muted">—</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-4 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleExpandMember(m.member_id)}
+                                      className="btn-secondary text-[12px] h-[28px] px-2.5"
+                                    >
+                                      {isExpanded ? "Hide breakdown" : "Why this score?"}
+                                    </button>
+                                  </td>
+                                </tr>
+
+                                {/* Expanded Evidence Breakdown */}
+                                {isExpanded && (
+                                  <tr className="bg-bg/25">
+                                    <td colSpan={6} className="p-4 border-b border-border">
+                                      {isEvLoading ? (
+                                        <p className="text-text-muted text-[12px] font-mono">Loading evidence...</p>
+                                      ) : ev ? (
+                                        <div className="space-y-4 text-[13px] text-text">
+                                          {/* Plain summary sentence */}
+                                          <div className="p-3 bg-surface border border-border rounded-[4px] font-medium text-text">
+                                            {ev.summary_sentence}
+                                          </div>
+
+                                          {/* Signal Breakdown */}
+                                          <div>
+                                            <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-2 text-text-muted">
+                                              Signal Breakdown
+                                            </h4>
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
+                                                <div className="text-[11px] text-text-muted uppercase">Survival ({Math.round(ev.signals.survival.weight * 100)}%)</div>
+                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
+                                                  {Math.round(ev.signals.survival.raw)} lines
+                                                </div>
+                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
+                                                  Share: {(ev.signals.survival.normalized * 100).toFixed(1)}%
+                                                </div>
+                                              </div>
+                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
+                                                <div className="text-[11px] text-text-muted uppercase">Effective Change ({Math.round(ev.signals.effective_change.weight * 100)}%)</div>
+                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
+                                                  {Math.round(ev.signals.effective_change.raw)} lines
+                                                </div>
+                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
+                                                  Share: {(ev.signals.effective_change.normalized * 100).toFixed(1)}%
+                                                </div>
+                                              </div>
+                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
+                                                <div className="text-[11px] text-text-muted uppercase">Ownership ({Math.round(ev.signals.ownership.weight * 100)}%)</div>
+                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
+                                                  {(ev.signals.ownership.normalized * 100).toFixed(1)}%
+                                                </div>
+                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
+                                                  {ev.owned_modules.length} owned module(s)
+                                                </div>
+                                              </div>
+                                              <div className="p-2.5 bg-surface border border-border rounded-[4px]">
+                                                <div className="text-[11px] text-text-muted uppercase">Collaboration ({Math.round(ev.signals.collaboration.weight * 100)}%)</div>
+                                                <div className="font-mono text-[14px] font-semibold text-text tabular-nums mt-0.5">
+                                                  {ev.signals.collaboration.raw.toFixed(1)} pts
+                                                </div>
+                                                <div className="font-mono text-[11px] text-text-muted mt-0.5">
+                                                  Share: {(ev.signals.collaboration.normalized * 100).toFixed(1)}%
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
+
+                                          {/* Owned Modules */}
+                                          {ev.owned_modules.length > 0 && (
+                                            <div>
+                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
+                                                Owned Modules
+                                              </h4>
+                                              <div className="flex flex-wrap gap-2">
+                                                {ev.owned_modules.map((om) => (
+                                                  <span key={om.path} className="font-mono text-[12px] border border-border bg-surface px-2 py-0.5 rounded-[4px]">
+                                                    {om.path} <span className="text-text-muted">({(om.share * 100).toFixed(1)}% lead)</span>
+                                                  </span>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+
+                                          {/* Top Commits & Files Grid */}
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
+                                                Top Commits by Impact
+                                              </h4>
+                                              {ev.top_commits.length === 0 ? (
+                                                <p className="text-[12px] text-text-muted">No counted commits</p>
+                                              ) : (
+                                                <div className="space-y-1">
+                                                  {ev.top_commits.map((tc) => (
+                                                    <div key={tc.sha} className="text-[12px] flex items-center justify-between gap-2 p-1.5 bg-surface border border-border rounded-[4px]">
+                                                      <div className="truncate flex items-center gap-1.5">
+                                                        {tc.commit_url ? (
+                                                          <a
+                                                            href={tc.commit_url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="font-mono text-accent hover:underline"
+                                                          >
+                                                            {tc.sha.slice(0, 7)}
+                                                          </a>
+                                                        ) : (
+                                                          <span className="font-mono text-text">{tc.sha.slice(0, 7)}</span>
+                                                        )}
+                                                        <span className="truncate text-text">{tc.subject}</span>
+                                                      </div>
+                                                      <span className="font-mono text-text-muted text-[11px] tabular-nums whitespace-nowrap">
+                                                        +{tc.effective_lines}
+                                                      </span>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              )}
+                                            </div>
+
+                                            <div>
+                                              <h4 className="text-[12px] font-semibold text-text uppercase tracking-wider mb-1.5 text-text-muted">
+                                                Top Files by Surviving Code
+                                              </h4>
+                                              {ev.top_files.length === 0 ? (
+                                                <p className="text-[12px] text-text-muted">No surviving files</p>
+                                              ) : (
+                                                <div className="space-y-1">
+                                                  {ev.top_files.map((tf) => (
+                                                    <div key={tf.path} className="text-[12px] flex items-center justify-between gap-2 p-1.5 bg-surface border border-border rounded-[4px]">
+                                                      <span className="font-mono truncate text-text">{tf.path}</span>
+                                                      <span className="font-mono text-text-muted text-[11px] tabular-nums whitespace-nowrap">
+                                                        {tf.surviving_lines} lines
+                                                      </span>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              )}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <p className="text-text-muted text-[12px]">Failed to load evidence breakdown.</p>
+                                      )}
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Footer line */}
+                  <div className="text-[12px] text-text-muted font-mono pt-1">
+                    Scoring version {scores.scoring_version}. Weights: survival {Math.round((scores.weights.survival ?? 0.4) * 100)}%, effective change {Math.round((scores.weights.effective_change ?? 0.25) * 100)}%, ownership {Math.round((scores.weights.ownership ?? 0.15) * 100)}%, collaboration {Math.round((scores.weights.collaboration ?? 0.2) * 100)}%.
+                  </div>
+                </>
+              )}
+            </section>
 
             {/* 2) Members Table */}
             <section className="space-y-3">

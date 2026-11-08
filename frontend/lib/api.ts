@@ -78,6 +78,46 @@ export interface CommitItem {
   files_changed: number;
 }
 
+export interface MemberScoreItem {
+  member_id: string;
+  display_name: string | null;
+  github_login: string | null;
+  share_percent: number;
+  confidence: "high" | "medium" | "low";
+  flags: string[];
+  signals: Record<string, { raw: number; normalized: number; weight: number }>;
+}
+
+export interface ProjectScoresResponse {
+  run_id: string;
+  project_id: string;
+  scoring_version: string;
+  head_sha: string;
+  finished_at: string | null;
+  weights: Record<string, number>;
+  stats: Record<string, unknown>;
+  project_flags: Array<{ code: string; message: string }>;
+  members: MemberScoreItem[];
+}
+
+export interface MemberEvidenceResponse {
+  member_id: string;
+  display_name: string | null;
+  github_login: string | null;
+  share_percent: number;
+  confidence: string;
+  top_commits: Array<{ sha: string; subject: string; effective_lines: number; commit_url: string }>;
+  top_files: Array<{ path: string; surviving_lines: number }>;
+  owned_modules: Array<{ path: string; share: number }>;
+  summary_sentence: string;
+  signals: Record<string, { raw: number; normalized: number; weight: number }>;
+}
+
+export interface AnalysisStatusResponse {
+  analysis_status: string;
+  analysis_error: string | null;
+}
+
 /**
  * Fetches the authenticated user profile from the backend.
  * When called on the server, forward the raw cookie string.
@@ -381,3 +421,80 @@ export async function getProjectCommits(
     return [];
   }
 }
+
+/**
+ * Fetches analysis status for a project.
+ */
+export async function getAnalysisStatus(
+  projectId: string
+): Promise<AnalysisStatusResponse | null> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/analysis/status`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches latest complete scores for a project.
+ */
+export async function getProjectScores(
+  projectId: string
+): Promise<ProjectScoresResponse | null> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/scores`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches evidence details for a specific member score.
+ */
+export async function getMemberEvidence(
+  projectId: string,
+  memberId: string
+): Promise<MemberEvidenceResponse | null> {
+  try {
+    const response = await fetch(
+      `/api/projects/${projectId}/scores/${memberId}/evidence`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      }
+    );
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Triggers a re-analysis run for a project.
+ */
+export async function triggerAnalysis(projectId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/analyze`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+

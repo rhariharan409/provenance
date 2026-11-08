@@ -1,5 +1,12 @@
 from fastapi import FastAPI
-from app.routers import health_router, auth_router, projects_router, analysis_router
+from app.routers import (
+    health_router,
+    auth_router,
+    projects_router,
+    analysis_router,
+    passports_router,
+    disputes_router,
+)
 
 app = FastAPI(
     title="Provenance API",
@@ -13,6 +20,8 @@ ROUTERS = [
     auth_router,
     projects_router,
     analysis_router,
+    passports_router,
+    disputes_router,
 ]
 
 for router in ROUTERS:

@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     ANALYSIS_TIMEOUT_SECONDS: int = 900
     BULK_COMMIT_LINE_CAP: int = 1500
 
+    # Section 4 settings
+    PASSPORT_SIGNING_SECRET: Optional[str] = None
+    PUBLIC_BASE_URL: str = "http://localhost:3000"
+    MAX_DISPUTE_TEXT: int = 1000
+    MAX_OPEN_DISPUTES_PER_USER: int = 5
+
     @model_validator(mode="after")
     def validate_and_normalize_weights(self):
         w_surv = self.SCORE_WEIGHT_SURVIVAL

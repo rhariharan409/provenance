@@ -3,7 +3,8 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import TopBar from "@/components/TopBar";
 import EmptyState from "@/components/EmptyState";
-import { getCurrentUser, getProjects } from "@/lib/api";
+import MyPassportsTable from "@/components/MyPassportsTable";
+import { getCurrentUser, getProjects, getMyPassportsServer } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,10 @@ export default async function DashboardPage() {
     redirect("/");
   }
 
-  const projects = await getProjects(rawCookie);
+  const [projects, myPassports] = await Promise.all([
+    getProjects(rawCookie),
+    getMyPassportsServer(rawCookie),
+  ]);
 
   const formattedLastLogin = user.last_login_at
     ? new Date(user.last_login_at).toISOString().replace("T", " ").replace(/\..+/, " UTC")
@@ -117,6 +121,8 @@ export default async function DashboardPage() {
             </div>
           )}
         </section>
+
+        <MyPassportsTable initialPassports={myPassports} />
 
         <section className="space-y-3">
           <h2 className="text-[13px] font-semibold text-text uppercase tracking-wider text-text-muted">

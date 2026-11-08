@@ -8,6 +8,8 @@ from app.models.commits import Commit
 from app.models.pull_requests import PullRequest, Review
 from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
 from app.models.contribution_scores import ContributionScore, ScoreConfidence
+from app.models.passports import Passport
+from app.models.disputes import Dispute, DisputeStatus
 
 __all__ = [
     "Base",
@@ -26,4 +28,7 @@ __all__ = [
     "AnalysisRunStatus",
     "ContributionScore",
     "ScoreConfidence",
+    "Passport",
+    "Dispute",
+    "DisputeStatus",
 ]

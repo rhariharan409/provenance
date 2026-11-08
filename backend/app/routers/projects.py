@@ -154,6 +154,7 @@ def create_project(
 
     return {
         "id": str(project.id),
+        "owner_id": str(project.owner_id),
         "name": project.name,
         "repo_full_name": project.repo_full_name,
         "repo_url": project.repo_url,
@@ -209,6 +210,7 @@ def get_project_detail(
 
     return {
         "id": str(project.id),
+        "owner_id": str(project.owner_id),
         "name": project.name,
         "repo_full_name": project.repo_full_name,
         "repo_url": project.repo_url,
@@ -338,6 +340,7 @@ def get_project_members(
 
         result.append({
             "id": str(m.id),
+            "user_id": str(m.user_id) if m.user_id else None,
             "login": m.github_login,
             "display_name": m.display_name,
             "commit_count": total_commits,

@@ -204,4 +204,57 @@ The script reports:
 - Baseline MAE from raw commit counts.
 - Spearman rank correlation comparing Provenance rankings vs. raw commit count rankings.
 
+---
+
+## Section 4: Passports, Seal, QR Code and Disputes
+
+Section 4 introduces shareable, tamper-evident **Contribution Passports** with cryptographic verification, QR codes, public read-only views, and a formal score dispute mechanism.
+
+### Key Features
+
+1. **Frozen Snapshot & Cryptographic Seal**:
+   - Each passport captures a complete, immutable snapshot of the project, member attribution, signals, stats, evidence, and anonymized team context at a specific analysis run.
+   - Sealed using HMAC-SHA256 (`provenance-seal-v1\n` prefix) over a canonical JSON serialization (`sort_keys=True`, `,` and `:` separators, UTF-8 bytes).
+   - Any tampering with the stored snapshot invalidates the verification check.
+
+2. **Public Verification & QR Codes**:
+   - `/p/[code]`: Publicly accessible, responsive document view designed strictly with Provenance's design tokens (IBM Plex Sans/Mono, Source Serif 4 title, flat 1px borders, print-ready CSS).
+   - `/api/public/passports/{code}/verify`: Instant cryptographic verification endpoint that re-calculates the seal using `hmac.compare_digest`. Never leaks the signing secret or server hashes.
+   - `/api/public/passports/{code}/qr.svg`: Dynamic SVG QR code generated with `segno` pointing directly to the public passport URL. Cached with `Cache-Control: public, max-age=3600`.
+
+3. **Privacy & Security Guarantees**:
+   - Public responses strip internal user IDs, email addresses, and dispute text.
+   - Teammates are anonymized as "Teammate A", "Teammate B"... with their contribution shares, revealing real GitHub logins only if that teammate has published an active passport for the same run.
+   - Public endpoints include security headers: `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`.
+   - In-memory rate limiting (60 requests/minute per client IP) returning HTTP 429 when exceeded.
+   - Revoking a passport returns HTTP 404 with the exact same response body as unknown codes, preventing existence leakage.
+
+4. **Contribution Score Dispute Workflow**:
+   - Members can raise disputes regarding their own score (enforcing `MAX_DISPUTE_TEXT` up to 1000 characters and `MAX_OPEN_DISPUTES_PER_USER`).
+   - Project owners and administrators review disputes via the "Disputes" panel, recording resolution notes and setting status (`resolved` or `rejected`).
+   - Resolving a dispute instructs the administrator to trigger a re-analysis run without auto-mutating past historical records.
+
+### Configuration Variables (`backend/.env`)
+
+```ini
+# Section 4 (Passports, Seal & Disputes)
+PASSPORT_SIGNING_SECRET=your_32_byte_secret_key_here  # Required to publish; returns 503 if not set
+PUBLIC_BASE_URL=http://localhost:3000                 # Base URL for public passport links and QR codes
+MAX_DISPUTE_TEXT=1000                                 # Maximum characters allowed per dispute message
+MAX_OPEN_DISPUTES_PER_USER=5                          # Maximum concurrent open disputes per user
+```
+
+### API Endpoints
+
+- `POST /projects/{id}/members/{member_id}/passport`: Creates or returns existing active passport for the member (login required; only the member's linked user can publish).
+- `GET /passports/mine`: Lists all passports published by the authenticated user with view counts and dispute summary.
+- `DELETE /passports/{code}`: Revokes an active passport (owner or admin only).
+- `GET /public/passports/{code}`: Public passport snapshot with seal and dispute summary.
+- `GET /public/passports/{code}/verify`: Public seal verification result (`valid: boolean`).
+- `GET /public/passports/{code}/qr.svg`: Public QR code in SVG format.
+- `POST /projects/{id}/members/{member_id}/disputes`: Raises a dispute on a member's score.
+- `GET /projects/{id}/disputes`: Lists disputes for a project (members see own; owners/admins see all).
+- `POST /projects/{id}/disputes/{dispute_id}/resolve`: Resolves or rejects a dispute with optional note (owner/admin only).
+
+
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import List, Optional
 from pydantic import model_validator
@@ -77,6 +78,32 @@ class Settings(BaseSettings):
             self.SCORE_WEIGHT_EFFECTIVE_CHANGE = round(w_eff / total, 6)
             self.SCORE_WEIGHT_OWNERSHIP = round(w_own / total, 6)
             self.SCORE_WEIGHT_COLLABORATION = round(w_collab / total, 6)
+        return self
+
+    @model_validator(mode="after")
+    def normalize_database_url(self):
+        url = self.DATABASE_URL
+        if url:
+            if url.startswith("postgres://"):
+                url = "postgresql+psycopg://" + url[len("postgres://"):]
+            elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+                url = "postgresql+psycopg://" + url[len("postgresql://"):]
+            self.DATABASE_URL = url
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_and_paths(self):
+        try:
+            os.makedirs(self.REPO_STORAGE_PATH, exist_ok=True)
+        except Exception:
+            pass
+
+        if self.is_production:
+            if not self.SESSION_SECRET or len(self.SESSION_SECRET.strip()) < 32:
+                raise ValueError("SESSION_SECRET must be set and at least 32 characters in production")
+            if not self.PASSPORT_SIGNING_SECRET or len(self.PASSPORT_SIGNING_SECRET.strip()) < 32:
+                raise ValueError("PASSPORT_SIGNING_SECRET must be set and at least 32 characters in production")
+
         return self
 
     @property

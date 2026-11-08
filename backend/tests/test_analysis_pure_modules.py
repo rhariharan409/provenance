@@ -17,6 +17,7 @@ from app.services.analysis.flags import (
     check_late_dump,
     check_rewritten_history,
 )
+from app.services.summary import generate_rule_based_summary
 
 
 def test_file_filter_rules():
@@ -59,6 +60,130 @@ def test_file_filter_rules():
     assert is_ignored("src/app.py")[0] is False
     assert is_ignored("frontend/components/Button.tsx")[0] is False
     assert is_ignored("main.go")[0] is False
+
+
+def test_file_filter_vendored_libraries_and_fonts():
+    # 1. bootstrap.css ignored as vendored library
+    ignored, reason = is_ignored("static/css/bootstrap.css")
+    assert ignored is True
+    assert reason == "vendored_library"
+
+    ignored, reason = is_ignored("bootstrap.css")
+    assert ignored is True
+    assert reason == "vendored_library"
+
+    # 2. FontAwesome.otf and font extensions ignored as font
+    ignored, reason = is_ignored("fonts/FontAwesome.otf")
+    assert ignored is True
+    assert reason == "font"
+
+    ignored, reason = is_ignored("FontAwesome.otf")
+    assert ignored is True
+    assert reason == "font"
+
+    for font_file in ["inter.ttf", "roboto.woff", "icon.woff2", "glyph.eot"]:
+        ignored, reason = is_ignored(f"assets/fonts/{font_file}")
+        assert ignored is True
+        assert reason == "font"
+
+    # 3. Normal app file NOT ignored
+    ignored, reason = is_ignored("src/app.py")
+    assert ignored is False
+    assert reason == ""
+
+    ignored, reason = is_ignored("backend/models.py")
+    assert ignored is False
+    assert reason == ""
+
+    # 4. Vendored path markers
+    for path_marker in [
+        "static/vendor/plugin.js",
+        "app/static/lib/react.js",
+        "web/static/libs/moment.js",
+        "assets/vendor/slider.js",
+        "src/third_party/zlib/zlib.c",
+        "bower_components/backbone/backbone.js",
+        "wwwroot/lib/lib.js",
+    ]:
+        ignored, reason = is_ignored(path_marker)
+        assert ignored is True
+        assert reason == "vendored_library"
+
+    # 5. Known third-party library filenames under static/assets/public/lib/vendor
+    for lib_path in [
+        "public/js/jquery.js",
+        "assets/css/font-awesome.css",
+        "assets/css/fontawesome.css",
+        "lib/popper.js",
+        "static/normalize.css",
+        "assets/animate.css",
+        "public/d3.js",
+        "lib/chart.js",
+    ]:
+        ignored, reason = is_ignored(lib_path)
+        assert ignored is True
+        assert reason == "vendored_library"
+
+    # 6. License banner > 20 KB
+    for banner in [
+        "/*! Bootstrap v5.3.0 */",
+        "/*! jQuery v3.6.0 | (c) OpenJS Foundation */",
+        "/*! Font Awesome Free 5.15.4 */",
+        "/** @license MIT */",
+        "/* Copyright (c) 2010-2024 Foo and other contributors */",
+        "/* Copyright (c) ... and other contributors */",
+    ]:
+        ignored, reason = is_ignored(
+            "custom_bundle.js",
+            size_bytes=25 * 1024,
+            content_preview=banner,
+        )
+        assert ignored is True
+        assert reason == "license_banner"
+
+    # License banner <= 20 KB (not ignored by banner)
+    ignored, reason = is_ignored(
+        "small_bundle.js",
+        size_bytes=10 * 1024,
+        content_preview="/*! Bootstrap v5.3.0 */",
+    )
+    assert ignored is False
+
+    # > 20 KB without license banner
+    ignored, reason = is_ignored(
+        "large_app.js",
+        size_bytes=25 * 1024,
+        content_preview="/* Normal application code */\nfunction main() {}",
+    )
+    assert ignored is False
+
+
+def test_rule_based_summary_never_names_ignored_files():
+    facts = {
+        "login": "alice",
+        "counted_commits": 10,
+        "active_days": 5,
+        "top_files": [
+            {"path": "static/css/bootstrap.css", "surviving_lines": 500},
+            {"path": "fonts/FontAwesome.otf", "surviving_lines": 300},
+            {"path": "src/app.py", "surviving_lines": 100},
+        ],
+        "owned_modules": [
+            {"path": "static/vendor", "share": 0.9},
+            {"path": "src", "share": 0.8},
+        ],
+        "top_commits": [
+            {"sha": "abcdef123456", "sha_short": "abcdef1", "subject": "Initial feature"}
+        ],
+        "pull_requests_opened": 2,
+        "reviews_given": 1,
+        "flags": [],
+    }
+    summary_text, _, _ = generate_rule_based_summary(facts)
+    assert "bootstrap.css" not in summary_text
+    assert "FontAwesome.otf" not in summary_text
+    assert "static/vendor" not in summary_text
+    assert "src/app.py" in summary_text
 
 
 def test_line_filter_c_like():

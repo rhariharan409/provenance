@@ -12,10 +12,11 @@ const nextConfig: NextConfig = {
     },
   },
   async rewrites() {
+    const backend = process.env.BACKEND_URL || backendUrl;
     return [
       {
         source: "/api/:path*",
-        destination: `${backendUrl}/:path*`,
+        destination: `${backend}/:path*`,
       },
     ];
   },

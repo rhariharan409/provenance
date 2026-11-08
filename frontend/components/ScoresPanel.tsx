@@ -226,6 +226,22 @@ export default function ScoresPanel({
               </div>
             )}
 
+            {typeof scores.stats?.vendored_files_ignored === "number" && (
+              <div className="bg-surface border border-border rounded-[4px] px-3 py-2 text-[12px] text-text-muted flex items-center justify-between">
+                <span>
+                  <strong className="text-text font-medium">Files:</strong> {Number(scores.stats.vendored_files_ignored)} vendored {Number(scores.stats.vendored_files_ignored) === 1 ? "file" : "files"} ignored
+                </span>
+                {Boolean(scores.stats.ignored_reasons && typeof scores.stats.ignored_reasons === "object") && (
+                  <span className="font-mono text-[11px] text-text-muted">
+                    {Object.entries(scores.stats.ignored_reasons as Record<string, number>)
+                      .filter(([, count]) => typeof count === "number" && count > 0)
+                      .map(([reason, count]) => `${reason}: ${count}`)
+                      .join(", ")}
+                  </span>
+                )}
+              </div>
+            )}
+
             {scores.timing_stats && (
               <div className="bg-surface border border-border rounded-[4px] px-3 py-2 text-[12px] text-text-muted font-mono flex flex-wrap gap-4 items-center">
                 <span className="font-semibold text-text uppercase tracking-wider text-[11px] font-sans">

@@ -13,6 +13,7 @@ from app.models.commits import Commit
 from app.models.contribution_scores import ContributionScore
 from app.models.members import Member
 from app.models.summaries import MemberSummary, SummaryMethod
+from app.services.analysis.file_filter import is_ignored
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +56,24 @@ def build_facts_bundle(
         })
 
     top_files: List[Dict[str, Any]] = []
-    for f in raw_top_files[:5]:
+    for f in raw_top_files:
+        p = str(f.get("path", "")).strip()
+        if not p or is_ignored(p)[0]:
+            continue
         top_files.append({
-            "path": str(f.get("path", "")),
+            "path": p,
             "surviving_lines": int(f.get("surviving_lines", 0)),
         })
+        if len(top_files) >= 5:
+            break
 
     owned_modules: List[Dict[str, Any]] = []
     for m in raw_owned_modules:
+        p = str(m.get("path") or m.get("module") or "").strip()
+        if not p or is_ignored(p)[0]:
+            continue
         owned_modules.append({
-            "path": str(m.get("path") or m.get("module") or ""),
+            "path": p,
             "share": float(m.get("share", 0.0)),
         })
 
@@ -125,14 +134,16 @@ def generate_rule_based_summary(facts: Dict[str, Any]) -> Tuple[str, SummaryMeth
 
     # Sentence 2: Files changed
     top_files = facts.get("top_files", [])
-    if top_files:
-        file_paths = [f["path"] for f in top_files[:2]]
+    valid_files = [f for f in top_files if f.get("path") and not is_ignored(str(f["path"]))[0]]
+    if valid_files:
+        file_paths = [f["path"] for f in valid_files[:2]]
         sentences.append(f"Primary surviving code resides in {', '.join(file_paths)}.")
 
     # Sentence 3: Module ownership
     owned = facts.get("owned_modules", [])
-    if owned:
-        mod = owned[0]
+    valid_owned = [m for m in owned if m.get("path") and not is_ignored(str(m["path"]))[0]]
+    if valid_owned:
+        mod = valid_owned[0]
         pct = round(mod["share"] * 100)
         sentences.append(f"Maintains primary ownership of module '{mod['path']}' ({pct}% lead share).")
 

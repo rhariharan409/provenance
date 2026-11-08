@@ -42,7 +42,11 @@ RATE_LIMIT_MAX_REQUESTS = 60
 
 
 def _check_rate_limit(request: Request) -> None:
-    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
     now = time.time()
     with _RATE_LIMIT_LOCK:
         timestamps = _IP_REQUESTS.get(client_ip, [])

@@ -335,7 +335,10 @@ def run_collection(
 
             if not clone_success:
                 _safe_rmtree(clone_path)
-                _update_project_progress(db, project, "Cloning repository...", 15)
+                if getattr(project, "last_collected_at", None) is not None:
+                    _update_project_progress(db, project, "Re-collecting repository history...", 15)
+                else:
+                    _update_project_progress(db, project, "Cloning repository...", 15)
 
                 # Attempt 1: Partial clone with --filter=blob:none --no-checkout --bare
                 partial_clone_cmd = [

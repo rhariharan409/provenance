@@ -1,4 +1,7 @@
+from contextlib import asynccontextmanager
+import os
 from fastapi import FastAPI
+from app.config import settings
 from app.routers import (
     health_router,
     auth_router,
@@ -15,10 +18,22 @@ from app.routers import (
     reviews_router,
 )
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure REPO_STORAGE_PATH exists and is writable at startup
+    try:
+        os.makedirs(settings.REPO_STORAGE_PATH, exist_ok=True)
+    except Exception:
+        pass
+    yield
+
+
 app = FastAPI(
     title="Provenance API",
     description="Evidence-backed contribution analysis API",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
 # List of routers: register each router in one place for clean extensibility

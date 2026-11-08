@@ -74,10 +74,25 @@ def _resolve_head_sha(clone_path: str, default_branch: Optional[str] = None) -> 
     return None
 
 
-def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[str, int, str]], int, int]:
+class CandidateFilesResult(tuple):
+    candidate_files: List[Tuple[str, int, str]]
+    files_total: int
+    files_ignored: int
+    ignored_reasons: Dict[str, int]
+
+    def __new__(cls, candidate_files, files_total, files_ignored, ignored_reasons=None):
+        obj = super().__new__(cls, (candidate_files, files_total, files_ignored))
+        obj.candidate_files = candidate_files
+        obj.files_total = files_total
+        obj.files_ignored = files_ignored
+        obj.ignored_reasons = ignored_reasons or {}
+        return obj
+
+
+def _list_candidate_files(clone_path: str, head_sha: str) -> CandidateFilesResult:
     """
     Lists files in bare repository via git ls-tree -r -l <head_sha>.
-    Returns (candidate_files, files_total, files_ignored).
+    Returns CandidateFilesResult(candidate_files, files_total, files_ignored, ignored_reasons).
     Each candidate is (path, size_bytes, blob_sha).
     """
     cmd = ["git", "--git-dir", clone_path, "ls-tree", "-r", "-l", head_sha]
@@ -91,11 +106,12 @@ def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[st
         timeout=60,
     )
     if proc.returncode != 0:
-        return [], 0, 0
+        return CandidateFilesResult([], 0, 0, {})
 
     candidate_files: List[Tuple[str, int, str]] = []
     files_total = 0
     files_ignored = 0
+    ignored_reasons: Dict[str, int] = {}
 
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -113,13 +129,37 @@ def _list_candidate_files(clone_path: str, head_sha: str) -> Tuple[List[Tuple[st
             size_bytes = int(meta_tokens[3])
 
         files_total += 1
-        ignored, _ = is_ignored(file_path, size_bytes)
+        ignored, reason = is_ignored(file_path, size_bytes)
+
+        # Check license banner if file is > 20 KB and not ignored yet
+        if not ignored and size_bytes and size_bytes > 20 * 1024 and blob_sha:
+            try:
+                p = subprocess.Popen(
+                    ["git", "--git-dir", clone_path, "cat-file", "blob", blob_sha],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                )
+                preview = p.stdout.read(2048) if p.stdout else b""
+                if p.stdout:
+                    p.stdout.close()
+                p.terminate()
+                p.wait()
+                if preview:
+                    is_lic, lic_reason = is_ignored(file_path, size_bytes, content_preview=preview)
+                    if is_lic:
+                        ignored, reason = is_lic, lic_reason
+            except Exception:
+                pass
+
         if ignored:
             files_ignored += 1
+            reason_cat = reason.split(":")[0].strip() if ":" in reason else reason
+            ignored_reasons[reason_cat] = ignored_reasons.get(reason_cat, 0) + 1
         else:
             candidate_files.append((file_path, size_bytes or 0, blob_sha))
 
-    return candidate_files, files_total, files_ignored
+    return CandidateFilesResult(candidate_files, files_total, files_ignored, ignored_reasons)
 
 
 def _process_and_record_blame(
@@ -215,10 +255,17 @@ def run_analysis(
 
             clone_path = project.clone_path
             if not clone_path or not os.path.exists(clone_path):
-                project.analysis_status = "failed"
-                project.analysis_error = "Repository bare clone was not found."
-                db.commit()
-                return
+                logger.info("Clone path missing for project %s (server restarted/wiped). Triggering re-clone before analysis.", project.id)
+                _update_analysis_progress(db, project, "Re-collecting repository history...", 10)
+                from app.services.collector import run_collection
+                run_collection(project.id, db_factory=db_factory)
+                db.refresh(project)
+                clone_path = project.clone_path
+                if not clone_path or not os.path.exists(clone_path):
+                    project.analysis_status = "failed"
+                    project.analysis_error = "Repository re-clone failed or clone was not found."
+                    db.commit()
+                    return
 
             # Mark running and create analysis_run
             head_sha = _resolve_head_sha(clone_path, project.default_branch)
@@ -252,7 +299,12 @@ def run_analysis(
 
             # 1. Candidate file selection
             t_list_start = time.time()
-            candidates, files_total, files_ignored = _list_candidate_files(clone_path, head_sha)
+            candidates_res = _list_candidate_files(clone_path, head_sha)
+            candidates, files_total, files_ignored = candidates_res
+            ignored_reasons = getattr(candidates_res, "ignored_reasons", {})
+            vendored_files_ignored = (
+                ignored_reasons.get("vendored_library", 0) + ignored_reasons.get("license_banner", 0)
+            )
             analysis_timings["list_files"] = round(time.time() - t_list_start, 3)
 
             is_truncated = False
@@ -686,6 +738,8 @@ def run_analysis(
                 "files_total": files_total,
                 "files_analyzed": files_analyzed,
                 "files_ignored": files_ignored,
+                "ignored_reasons": ignored_reasons,
+                "vendored_files_ignored": vendored_files_ignored,
                 "lines_surviving": survival_results.total_surviving_lines,
                 "commits_counted": commits_counted,
                 "commits_excluded": commits_excluded,

@@ -61,6 +61,15 @@ export default async function LandingPage({ searchParams }: PageProps) {
           </div>
         </div>
       </main>
+
+      <footer className="w-full border-t border-border py-6 bg-surface/50">
+        <div className="max-w-[1120px] mx-auto px-4 flex items-center justify-between text-xs text-text-muted">
+          <span>Provenance &mdash; Evidence-backed contribution records</span>
+          <a href="/privacy" className="hover:text-text transition-colors">
+            Privacy Policy
+          </a>
+        </div>
+      </footer>
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import {
   ProjectDetail,
   MemberDetail,
@@ -30,6 +31,17 @@ import {
   createDispute,
   listDisputes,
   resolveDispute,
+  ProjectFacultyItem,
+  MemberSummaryItem,
+  OriginalityResponse,
+  getProjectFaculty,
+  assignProjectFaculty,
+  removeProjectFaculty,
+  getProjectSummaries,
+  generateProjectSummaries,
+  getOriginalityMatches,
+  runOriginalityCheck,
+  getExportCsvUrl,
 } from "@/lib/api";
 
 export default function ProjectDetailPage() {
@@ -62,11 +74,27 @@ export default function ProjectDetailPage() {
   const [disputeError, setDisputeError] = useState<string | null>(null);
   const [disputeSuccess, setDisputeSuccess] = useState<string | null>(null);
 
-  // Disputes list (for owner/admin)
+  // Disputes list (for owner/faculty/admin)
   const [disputes, setDisputes] = useState<DisputeItem[]>([]);
   const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [disputeNotice, setDisputeNotice] = useState<string | null>(null);
+
+  // Section 5: Faculty Assignment state
+  const [facultyList, setFacultyList] = useState<ProjectFacultyItem[]>([]);
+  const [facultyInput, setFacultyInput] = useState("");
+  const [addingFaculty, setAddingFaculty] = useState(false);
+  const [facultyError, setFacultyError] = useState<string | null>(null);
+
+  // Section 5: Summaries state
+  const [summaries, setSummaries] = useState<MemberSummaryItem[]>([]);
+  const [generatingSummaries, setGeneratingSummaries] = useState(false);
+  const [summariesError, setSummariesError] = useState<string | null>(null);
+
+  // Section 5: Originality state
+  const [originalityResponse, setOriginalityResponse] = useState<OriginalityResponse | null>(null);
+  const [runningOriginality, setRunningOriginality] = useState(false);
+  const [originalityError, setOriginalityError] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
@@ -79,6 +107,8 @@ export default function ProjectDetailPage() {
   const [confirmMerge, setConfirmMerge] = useState(false);
 
   const isOwnerOrAdmin = Boolean(currentUser && project && (project.owner_id === currentUser.id || currentUser.role === "admin"));
+  const isAssignedFaculty = Boolean(currentUser && currentUser.role === "faculty" && facultyList.some((f) => f.user_id === currentUser.id));
+  const canExport = isOwnerOrAdmin || isAssignedFaculty;
 
   const loadData = useCallback(async () => {
     if (!id) return;
@@ -96,7 +126,7 @@ export default function ProjectDetailPage() {
     setProject(proj);
 
     if (proj.status === "ready") {
-      const [mems, aliases, cms, statusRes, scoreRes, dispList, myPassports] = await Promise.all([
+      const [mems, aliases, cms, statusRes, scoreRes, dispList, myPassports, facList, sums, orig] = await Promise.all([
         getProjectMembers(id),
         getProjectUnlinkedAliases(id),
         getProjectCommits(id, 50, 0),
@@ -104,11 +134,17 @@ export default function ProjectDetailPage() {
         getProjectScores(id),
         listDisputes(id),
         getMyPassports(),
+        getProjectFaculty(id),
+        getProjectSummaries(id),
+        getOriginalityMatches(id),
       ]);
       setMembers(mems);
       setUnlinkedAliases(aliases);
       setCommits(cms);
       setDisputes(dispList);
+      setFacultyList(facList);
+      setSummaries(sums);
+      setOriginalityResponse(orig);
       if (myPassports && myPassports.length > 0) {
         const initialPassports: Record<string, { code: string; url: string }> = {};
         for (const p of myPassports) {
@@ -211,6 +247,77 @@ export default function ProjectDetailPage() {
       setDisputeNotice("Failed to update dispute.");
     } finally {
       setResolvingId(null);
+    }
+  };
+
+  // Section 5 Handlers
+  const handleAddFaculty = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!facultyInput.trim() || addingFaculty) return;
+    setAddingFaculty(true);
+    setFacultyError(null);
+    try {
+      const res = await assignProjectFaculty(id, facultyInput.trim());
+      if (res.ok) {
+        setFacultyInput("");
+        const updated = await getProjectFaculty(id);
+        setFacultyList(updated);
+      } else {
+        setFacultyError(res.error || "Failed to assign faculty.");
+      }
+    } catch {
+      setFacultyError("Failed to assign faculty.");
+    } finally {
+      setAddingFaculty(false);
+    }
+  };
+
+  const handleRemoveFaculty = async (userId: string) => {
+    try {
+      const res = await removeProjectFaculty(id, userId);
+      if (res.ok) {
+        setFacultyList((prev) => prev.filter((f) => f.user_id !== userId));
+      } else {
+        setFacultyError(res.error || "Failed to remove faculty.");
+      }
+    } catch {
+      setFacultyError("Failed to remove faculty.");
+    }
+  };
+
+  const handleGenerateSummaries = async () => {
+    setGeneratingSummaries(true);
+    setSummariesError(null);
+    try {
+      const res = await generateProjectSummaries(id);
+      if (res.ok) {
+        const updated = await getProjectSummaries(id);
+        setSummaries(updated);
+      } else {
+        setSummariesError(res.error || "Failed to generate summaries.");
+      }
+    } catch {
+      setSummariesError("Failed to generate summaries.");
+    } finally {
+      setGeneratingSummaries(false);
+    }
+  };
+
+  const handleRunOriginality = async () => {
+    setRunningOriginality(true);
+    setOriginalityError(null);
+    try {
+      const res = await runOriginalityCheck(id);
+      if (res.ok) {
+        const updated = await getOriginalityMatches(id);
+        setOriginalityResponse(updated);
+      } else {
+        setOriginalityError(res.error || "Failed to run originality check.");
+      }
+    } catch {
+      setOriginalityError("Failed to run originality check.");
+    } finally {
+      setRunningOriginality(false);
     }
   };
 
@@ -405,22 +512,35 @@ export default function ProjectDetailPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleRecollect}
-              disabled={actionLoading || project.status === "analyzing"}
-              className="btn-secondary text-[13px]"
-            >
-              Re-run collection
-            </button>
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={actionLoading}
-              className={`btn-secondary text-[13px] ${confirmDelete ? "border-danger text-danger" : ""}`}
-            >
-              {confirmDelete ? "Confirm delete" : "Delete project"}
-            </button>
+            {canExport && (
+              <a
+                href={getExportCsvUrl(id)}
+                className="btn-secondary text-[13px]"
+                download={`provenance-${project.repo_full_name.replace("/", "-")}.csv`}
+              >
+                Export CSV
+              </a>
+            )}
+            {isOwnerOrAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleRecollect}
+                  disabled={actionLoading || project.status === "analyzing"}
+                  className="btn-secondary text-[13px]"
+                >
+                  Re-run collection
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={actionLoading}
+                  className={`btn-secondary text-[13px] ${confirmDelete ? "border-danger text-danger" : ""}`}
+                >
+                  {confirmDelete ? "Confirm delete" : "Delete project"}
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -899,7 +1019,7 @@ export default function ProjectDetailPage() {
             </section>
 
             {/* Disputes Panel */}
-            {(isOwnerOrAdmin || disputes.length > 0) && (
+            {(isOwnerOrAdmin || isAssignedFaculty || disputes.length > 0) && (
               <section className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
@@ -930,7 +1050,7 @@ export default function ProjectDetailPage() {
                         const mem = members.find((x) => x.id === d.member_id);
                         const memberLabel = mem ? (mem.display_name || mem.login || d.member_id) : d.member_id;
                         const isOpen = d.status === "open";
-                        const canResolve = isOwnerOrAdmin && isOpen && (currentUser?.role === "admin" || d.raised_by !== currentUser?.id);
+                        const canResolve = (isOwnerOrAdmin || isAssignedFaculty) && isOpen && (currentUser?.role === "admin" || isAssignedFaculty || d.raised_by !== currentUser?.id);
 
                         return (
                           <div key={d.id} className="p-4 space-y-3 text-[13px]">
@@ -1000,6 +1120,333 @@ export default function ProjectDetailPage() {
                 </div>
               </section>
             )}
+
+            {/* Section 5: Faculty Assignment Panel */}
+            {isOwnerOrAdmin && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
+                      Assigned Faculty
+                    </h2>
+                    <p className="text-xs text-text-muted mt-0.5">
+                      Instructors assigned to review contributions, audit evidence, and resolve disputes.
+                    </p>
+                  </div>
+                  <span className="font-mono text-[12px] text-text-muted">
+                    {facultyList.length} assigned
+                  </span>
+                </div>
+
+                {facultyError && (
+                  <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
+                    <span>{facultyError}</span>
+                    <button onClick={() => setFacultyError(null)} className="text-xs text-danger/70 hover:text-danger">
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
+                <div className="bg-surface border border-border rounded-[6px] p-4 space-y-4">
+                  <form onSubmit={handleAddFaculty} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="GitHub username to assign..."
+                      value={facultyInput}
+                      onChange={(e) => setFacultyInput(e.target.value)}
+                      disabled={addingFaculty}
+                      className="text-[13px] h-[32px] px-3 bg-surface border border-border rounded-[4px] text-text flex-1 max-w-[300px] focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      type="submit"
+                      disabled={addingFaculty || !facultyInput.trim()}
+                      className="btn-secondary h-[32px] px-3 text-[13px]"
+                    >
+                      {addingFaculty ? "Assigning..." : "Assign faculty"}
+                    </button>
+                  </form>
+
+                  {facultyList.length === 0 ? (
+                    <p className="text-xs text-text-muted">No faculty members currently assigned to this project.</p>
+                  ) : (
+                    <div className="divide-y divide-border border-t border-border pt-2">
+                      {facultyList.map((f) => (
+                        <div key={f.id} className="py-2.5 flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2.5">
+                            {f.avatar_url ? (
+                              <Image
+                                src={f.avatar_url}
+                                alt={f.username}
+                                width={24}
+                                height={24}
+                                unoptimized
+                                className="w-6 h-6 rounded-[3px] border border-border object-cover"
+                              />
+                            ) : (
+                              <div className="w-6 h-6 rounded-[3px] bg-bg border border-border flex items-center justify-center text-[10px] font-mono text-text-muted">
+                                {f.username.slice(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <div>
+                              <span className="font-mono text-[13px] font-medium text-text">{f.username}</span>
+                              {f.display_name && (
+                                <span className="ml-2 text-xs text-text-muted">({f.display_name})</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono text-[11px] text-text-muted">
+                              Assigned {new Date(f.assigned_at).toISOString().split("T")[0]}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveFaculty(f.user_id)}
+                              className="text-xs text-danger/80 hover:text-danger font-medium"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Section 5: Evidence-Grounded Summaries Panel */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
+                    Evidence-Grounded Summaries
+                  </h2>
+                  <p className="text-xs text-text-muted mt-0.5">
+                    Natural language summaries of contributor achievements, audited against commit hashes.
+                  </p>
+                </div>
+                {isOwnerOrAdmin && (
+                  <button
+                    type="button"
+                    onClick={handleGenerateSummaries}
+                    disabled={generatingSummaries}
+                    className="btn-secondary text-[12px] h-[30px] px-3"
+                  >
+                    {generatingSummaries ? "Generating..." : "Generate summaries"}
+                  </button>
+                )}
+              </div>
+
+              {summariesError && (
+                <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
+                  <span>{summariesError}</span>
+                  <button onClick={() => setSummariesError(null)} className="text-xs text-danger/70 hover:text-danger">
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              <div className="bg-surface border border-border rounded-[6px] overflow-hidden">
+                {summaries.length === 0 ? (
+                  <div className="p-6 text-center text-text-muted text-[13px]">
+                    No contributor summaries generated yet.
+                    {isOwnerOrAdmin && " Click 'Generate summaries' to analyze contributor commits and generate evidence-backed summaries."}
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {summaries.map((s) => {
+                      const mem = members.find((m) => m.id === s.member_id);
+                      const memberLabel = mem ? (mem.display_name || mem.login || s.member_id) : s.member_id;
+
+                      return (
+                        <div key={s.id} className="p-5 space-y-3">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-text text-[14px]">{memberLabel}</span>
+                              {mem?.login && (
+                                <span className="font-mono text-xs text-text-muted">@{mem.login}</span>
+                              )}
+                            </div>
+                            <div>
+                              {s.method === "llm" ? (
+                                <span className="inline-block px-2 py-0.5 text-[11px] font-medium rounded-[4px] bg-accent/10 text-accent border border-accent/20">
+                                  Generated by AI from repository evidence
+                                </span>
+                              ) : (
+                                <span className="inline-block px-2 py-0.5 text-[11px] font-medium rounded-[4px] bg-bg text-text-muted border border-border">
+                                  Generated from repository evidence
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <p className="text-[13px] text-text leading-relaxed font-sans whitespace-pre-wrap">
+                            {s.summary_text}
+                          </p>
+
+                          {s.citations && s.citations.length > 0 && (
+                            <div className="pt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                              <span className="text-text-muted font-medium text-[11px] uppercase tracking-wider mr-1">
+                                Citations:
+                              </span>
+                              {s.citations.map((sha) => (
+                                <a
+                                  key={sha}
+                                  href={`https://github.com/${project.repo_full_name}/commit/${sha}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="font-mono text-accent hover:underline text-[12px] bg-bg px-1.5 py-0.5 rounded border border-border transition-colors"
+                                  title={`View commit ${sha}`}
+                                >
+                                  {sha.slice(0, 7)}
+                                </a>
+                              ))}
+                            </div>
+                          )}
+
+                          {s.disclaimer && (
+                            <p className="text-[11px] text-text-muted pt-1 border-t border-border/50">
+                              {s.disclaimer}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Section 5: Originality & Similarity Check Panel */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-[14px] font-semibold text-text uppercase tracking-wider text-text-muted">
+                    Originality &amp; Similarity Check
+                  </h2>
+                  <p className="text-xs text-text-muted mt-0.5">
+                    Cross-repository winnowing fingerprint analysis to identify shared code blocks and templates.
+                  </p>
+                </div>
+                {isOwnerOrAdmin && (
+                  <button
+                    type="button"
+                    onClick={handleRunOriginality}
+                    disabled={runningOriginality}
+                    className="btn-secondary text-[12px] h-[30px] px-3"
+                  >
+                    {runningOriginality ? "Scanning..." : "Run originality check"}
+                  </button>
+                )}
+              </div>
+
+              {originalityError && (
+                <div className="p-3 bg-surface border border-danger/40 rounded-[4px] text-danger text-[13px] flex items-center justify-between">
+                  <span>{originalityError}</span>
+                  <button onClick={() => setOriginalityError(null)} className="text-xs text-danger/70 hover:text-danger">
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              <div className="bg-surface border border-border rounded-[6px] p-5 space-y-4">
+                {!originalityResponse ? (
+                  <div className="text-center text-text-muted text-[13px] py-4">
+                    Originality analysis has not been run for this repository.
+                    {isOwnerOrAdmin && " Click 'Run originality check' to scan against comparison repositories."}
+                  </div>
+                ) : originalityResponse.matches && originalityResponse.matches.length > 0 ? (
+                  <div className="space-y-4">
+                    <div className="p-3 bg-warning/10 border border-warning/30 rounded-[4px]">
+                      <h3 className="text-sm font-semibold text-warning">
+                        Similarity found. Please review.
+                      </h3>
+                      <p className="text-xs text-text-muted mt-1">
+                        {originalityResponse.disclaimer}
+                      </p>
+                    </div>
+
+                    <div className="overflow-x-auto border border-border rounded-[4px]">
+                      <table className="w-full text-left border-collapse text-sm">
+                        <thead>
+                          <tr className="border-b border-border bg-bg/50">
+                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                              Compared Repository
+                            </th>
+                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
+                              Shared Lines (est.)
+                            </th>
+                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider text-right">
+                              Shared Fingerprints
+                            </th>
+                            <th className="py-2 px-3 font-medium text-text-muted text-[12px] uppercase tracking-wider">
+                              Matching Files
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border text-[13px]">
+                          {originalityResponse.matches.map((m, idx) => (
+                            <tr key={m.id || idx} className="hover:bg-bg/40 transition-colors">
+                              <td className="py-2.5 px-3 font-mono text-text">
+                                {m.other_project_name || "Comparison repository"}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono text-text">
+                                ~{m.shared_lines_estimate}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono text-text-muted">
+                                {m.shared_fingerprints}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {m.top_files && m.top_files.length > 0 ? (
+                                  <div className="space-y-1">
+                                    {m.top_files.map((tf, fIdx) => (
+                                      <div key={fIdx} className="font-mono text-xs text-text-muted">
+                                        <span className="text-text">{tf.file}</span>
+                                        {tf.file !== tf.other_file && (
+                                          <span> &harr; {tf.other_file}</span>
+                                        )}
+                                        <span className="ml-1 text-[11px] text-text-muted">({tf.count} hashes)</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-text-muted">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : originalityResponse.external_similarity_flag ? (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-warning/10 border border-warning/30 rounded-[4px]">
+                      <h3 className="text-sm font-semibold text-warning">
+                        Similarity found. Please review.
+                      </h3>
+                      <p className="text-xs text-text mt-1">
+                        Similarity detected across {originalityResponse.external_match_count || 1} external repository projects.
+                      </p>
+                      <p className="text-xs text-text-muted mt-1">
+                        {originalityResponse.disclaimer}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[13px] text-text">
+                      No substantial similarity detected across comparison repositories (minimum threshold: {originalityResponse.threshold_lines} lines).
+                    </p>
+                    <p className="text-xs text-text-muted">
+                      {originalityResponse.disclaimer}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
+
 
             {/* 2) Members Table */}
             <section className="space-y-3">

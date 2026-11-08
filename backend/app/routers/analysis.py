@@ -22,12 +22,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects", tags=["analysis"])
 
 
-def _check_project_access(project: Optional[Project], user: User) -> Project:
+def _check_project_access(
+    project: Optional[Project],
+    user: User,
+    db: Optional[Session] = None,
+    write: bool = False,
+) -> Project:
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    if user.role != UserRole.admin and project.owner_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    return project
+    if user.role == UserRole.admin or project.owner_id == user.id:
+        return project
+    if not write and user.role == UserRole.faculty and db is not None:
+        from app.models.faculty import ProjectFaculty
+        is_assigned = (
+            db.query(ProjectFaculty)
+            .filter(
+                ProjectFaculty.project_id == project.id,
+                ProjectFaculty.faculty_user_id == user.id,
+            )
+            .first()
+            is not None
+        )
+        if is_assigned:
+            return project
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
 
 class AnalysisStatusResponse(BaseModel):
@@ -78,7 +96,7 @@ def trigger_analysis(
     current_user: User = Depends(get_current_user),
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    _check_project_access(project, current_user)
+    _check_project_access(project, current_user, write=True)
 
     if project.analysis_status == "running":
         raise HTTPException(
@@ -105,7 +123,7 @@ def get_analysis_status(
     current_user: User = Depends(get_current_user),
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    _check_project_access(project, current_user)
+    _check_project_access(project, current_user, db=db, write=False)
     return AnalysisStatusResponse(
         analysis_status=project.analysis_status or "pending",
         analysis_error=project.analysis_error,
@@ -119,7 +137,7 @@ def get_project_scores(
     current_user: User = Depends(get_current_user),
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    _check_project_access(project, current_user)
+    _check_project_access(project, current_user, db=db, write=False)
 
     latest_run = (
         db.query(AnalysisRun)
@@ -191,7 +209,7 @@ def get_member_evidence(
     current_user: User = Depends(get_current_user),
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    _check_project_access(project, current_user)
+    _check_project_access(project, current_user, db=db, write=False)
 
     latest_run = (
         db.query(AnalysisRun)

@@ -779,3 +779,287 @@ export async function resolveDispute(
   }
 }
 
+// ---------------------------------------------------------
+// Section 5: Admin, Faculty, Summaries, Originality, Account
+// ---------------------------------------------------------
+
+export interface AdminUserItem {
+  id: string;
+  github_id: number;
+  username: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  email: string | null;
+  role: "student" | "faculty" | "admin";
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface ProjectFacultyItem {
+  id: string;
+  user_id: string;
+  username: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  assigned_at: string;
+  assigned_by: string;
+}
+
+export interface FacultyProjectItem {
+  id: string;
+  name: string;
+  repo_full_name: string;
+  repo_url: string;
+  owner_id: string;
+  created_at: string;
+  members_count: number;
+  open_disputes_count: number;
+  flags_count: number;
+  assigned_at: string;
+}
+
+export interface MemberSummaryItem {
+  id: string;
+  run_id: string;
+  member_id: string;
+  method: "llm" | "rule_based";
+  summary_text: string;
+  citations: string[];
+  generated_at: string;
+  disclaimer: string;
+}
+
+export interface OriginalityMatchItem {
+  id?: string;
+  other_project_id?: string;
+  other_project_name?: string;
+  shared_fingerprints?: number;
+  shared_lines_estimate?: number;
+  top_files?: Array<{ file: string; other_file: string; count: number }>;
+}
+
+export interface OriginalityResponse {
+  matches: OriginalityMatchItem[];
+  external_similarity_flag?: boolean;
+  external_match_count?: number;
+  threshold_lines: number;
+  disclaimer: string;
+}
+
+export async function getAdminUsers(
+  query: string = "",
+  limit: number = 50,
+  offset: number = 0
+): Promise<{ users: AdminUserItem[]; total: number }> {
+  try {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (query) params.append("query", query);
+    const response = await fetch(`/api/admin/users?${params.toString()}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return { users: [], total: 0 };
+    const data = await response.json();
+    if (Array.isArray(data)) {
+      return { users: data, total: data.length };
+    }
+    return data;
+  } catch {
+    return { users: [], total: 0 };
+  }
+}
+
+export async function updateUserRole(
+  userId: string,
+  role: "student" | "faculty" | "admin"
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/role`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ role }),
+    });
+    if (response.ok) return { ok: true };
+    const errData = await response.json().catch(() => ({}));
+    return { ok: false, error: errData.detail || "Failed to update role." };
+  } catch {
+    return { ok: false, error: "Network error updating role." };
+  }
+}
+
+export async function getProjectFaculty(projectId: string): Promise<ProjectFacultyItem[]> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/faculty`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    return await response.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function assignProjectFaculty(
+  projectId: string,
+  username: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/faculty`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ username }),
+    });
+    if (response.ok) return { ok: true };
+    const errData = await response.json().catch(() => ({}));
+    return { ok: false, error: errData.detail || "Failed to assign faculty." };
+  } catch {
+    return { ok: false, error: "Network error assigning faculty." };
+  }
+}
+
+export async function removeProjectFaculty(
+  projectId: string,
+  userId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/faculty/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" },
+    });
+    if (response.ok) return { ok: true };
+    const errData = await response.json().catch(() => ({}));
+    return { ok: false, error: errData.detail || "Failed to remove faculty." };
+  } catch {
+    return { ok: false, error: "Network error removing faculty." };
+  }
+}
+
+export async function getFacultyAssignedProjects(): Promise<FacultyProjectItem[]> {
+  try {
+    const response = await fetch(`/api/faculty/projects`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    return await response.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function getFacultyAssignedProjectsServer(rawCookie?: string): Promise<FacultyProjectItem[]> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (rawCookie) headers["Cookie"] = rawCookie;
+    const response = await fetch(`${BACKEND_URL}/faculty/projects`, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    return await response.json();
+  } catch {
+    return [];
+  }
+}
+
+export function getExportCsvUrl(projectId: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/export.csv`;
+}
+
+export async function generateProjectSummaries(
+  projectId: string
+): Promise<{ ok: boolean; count?: number; error?: string }> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/summaries/generate`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) {
+      return { ok: true, count: data.count };
+    }
+    return { ok: false, error: data.detail || "Failed to generate summaries." };
+  } catch {
+    return { ok: false, error: "Network error generating summaries." };
+  }
+}
+
+export async function getProjectSummaries(projectId: string): Promise<MemberSummaryItem[]> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/summaries`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    return await response.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function runOriginalityCheck(
+  projectId: string
+): Promise<{ ok: boolean; message?: string; matches_count?: number; error?: string }> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/originality/run`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) {
+      return { ok: true, message: data.message, matches_count: data.matches_count };
+    }
+    return { ok: false, error: data.detail || "Failed to run originality check." };
+  } catch {
+    return { ok: false, error: "Network error running originality check." };
+  }
+}
+
+export async function getOriginalityMatches(projectId: string): Promise<OriginalityResponse | null> {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/originality`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function exportMyData(): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(`/api/me/export`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteMyAccount(confirmText: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch(`/api/me`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ confirm: confirmText }),
+    });
+    if (response.ok) return { ok: true };
+    const data = await response.json().catch(() => ({}));
+    return { ok: false, error: data.detail || "Failed to delete account." };
+  } catch {
+    return { ok: false, error: "Network error deleting account." };
+  }
+}
+

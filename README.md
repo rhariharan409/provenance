@@ -256,5 +256,66 @@ MAX_OPEN_DISPUTES_PER_USER=5                          # Maximum concurrent open 
 - `GET /projects/{id}/disputes`: Lists disputes for a project (members see own; owners/admins see all).
 - `POST /projects/{id}/disputes/{dispute_id}/resolve`: Resolves or rejects a dispute with optional note (owner/admin only).
 
+---
+
+## Section 5: Faculty View, Admin Tools, Summaries, Originality, and Privacy
+
+Section 5 completes the institutional and enterprise capabilities of Provenance: faculty workflows, administrative controls, evidence-grounded natural language summaries, cross-repository originality analysis, user account deletion, and public privacy policies.
+
+### Key Features
+
+1. **Faculty Workflows & Role-Based Access**:
+   - Instructors can be assigned to repositories by project owners or system administrators (`POST /projects/{id}/faculty`).
+   - Assigned faculty can audit project scores, inspect commit evidence, view originality matches, export CSV records, and resolve open student disputes.
+   - Unassigned faculty members are restricted by zero-knowledge access controls (HTTP 404).
+   - Faculty dashboard displays a dedicated "Assigned projects" table tracking member counts, open disputes, and flagged scores.
+
+2. **Administrator Console (`/admin/users`)**:
+   - Secure management panel for administrators to search registered accounts, inspect user details, and assign roles (`student`, `faculty`, `admin`).
+   - Critical protection safeguards prevent demoting or deleting the last remaining system administrator.
+
+3. **CSV Export with Formula Injection Escaping**:
+   - `GET /projects/{id}/export.csv` provides clean, tabular exports of contributor rankings, share percentages, confidence ratings, flags, commit volume, and surviving lines.
+   - Comprehensive formula injection protection: any spreadsheet cell starting with dangerous characters (`=`, `+`, `-`, `@`) is safely escaped with a prepended single quote (`'`).
+
+4. **Evidence-Grounded Natural Language Summaries**:
+   - Generates concise 3-to-5 sentence summaries describing key technical contributions, audited against committed commit SHAs (`[sha]`).
+   - **Privacy-Safe Facts Bundle**: Sent payloads strictly contain aggregate metrics, commit subject lines, and commit hashes. Never transmits source code files, author email addresses, or peer teammate names.
+   - **Dual-Engine Architecture**: Integrates Anthropic Claude models via `httpx`. Validates all output citations against facts; automatically falls back to deterministic rule-based generation if citations are ungrounded or if API limits are reached.
+
+5. **Cross-Repository Originality Check**:
+   - AST line classification and normalization: removes comments and blank lines, strips literal string and numeric variations, lowercases and collapses whitespace to capture true structural equivalence.
+   - **Winnowing Algorithm**: Signed 64-bit integer hashes over k-grams (`k=8`, `w=4`) stored in PostgreSQL BigInt.
+   - **Boilerplate Detection**: Automatically filters out template and framework hashes appearing across more than 5 distinct projects.
+   - **Student Privacy & Neutral Phrasing**: Students viewing comparison results see only their own projects or a generic external count without file paths or peer repository names.
+   - Strictly enforces objective, non-accusatory academic language: displays *"Similarity found. Please review."* alongside the required disclaimer (*"Similarity can come from shared templates, tutorials or team collaboration. It is not a finding of misconduct."*). Never uses prohibited terms (*"plagiarism"*, *"copied"*, or *"cheating"*).
+
+6. **Account Deletion & Data Portability**:
+   - `GET /me/export`: Allows users to download a machine-readable JSON snapshot containing their profile metadata, owned projects, passports, and disputes.
+   - `DELETE /me`: Irrevocably deletes user account, unlinks project memberships, cascades deletion of passports and disputes, purges on-disk bare git clone directories (`REPO_STORAGE_PATH/{id}.git`), and clears session cookies. Requires explicit confirmation text (`"confirm": "DELETE"`).
+
+7. **Public Privacy Page (`/privacy`)**:
+   - Publicly accessible page detailing data storage policies, data minimization practices, AI zero-retention usage, access permissions, and student rights.
+
+### Configuration Variables (`backend/.env`)
+
+```ini
+# Section 5 (Faculty, Admin, Summaries, Originality, Privacy)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here          # Optional: Enables LLM-powered summaries
+SUMMARY_MODEL=claude-sonnet-4-5                       # Model identifier for summary generation
+SUMMARY_MAX_TOKENS=600                                # Maximum response tokens for summaries
+ORIGINALITY_MIN_SHARED_LINES=40                       # Minimum estimated shared lines threshold
+ORIGINALITY_KGRAM=8                                   # K-gram size for originality hashing
+ORIGINALITY_WINDOW=4                                  # Winnowing window size
+```
+
+### Migration History
+
+- `001_initial_schema.py`: Base tables (`users`).
+- `002_section2_schema.py`: Repository and collection tables (`projects`, `members`, `commits`, `pull_requests`, `reviews`, `author_aliases`, `contributions`).
+- `003_scoring_schema.py`: Analysis runs and scoring tables (`analysis_runs`, `contribution_scores`).
+- `004_passport_and_disputes_schema.py`: Passports and disputes tables (`passports`, `disputes`).
+- `005_section5_schema.py`: Faculty assignments, member summaries, and originality tables (`project_faculty`, `member_summaries`, `fingerprints`, `originality_matches`).
+
 
 

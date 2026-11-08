@@ -4,8 +4,13 @@ import type { NextRequest } from "next/server";
 export default function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Explicitly allow public access to passports and verification routes
-  if (pathname.startsWith("/p/") || pathname.startsWith("/verify/")) {
+  // Explicitly allow public access to passports, verification routes, and privacy page
+  if (
+    pathname.startsWith("/p/") ||
+    pathname.startsWith("/verify/") ||
+    pathname === "/privacy" ||
+    pathname.startsWith("/privacy/")
+  ) {
     return NextResponse.next();
   }
 
@@ -21,6 +26,6 @@ export default function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*"],
+  matcher: ["/dashboard/:path*", "/account/:path*", "/admin/:path*"],
 };
 

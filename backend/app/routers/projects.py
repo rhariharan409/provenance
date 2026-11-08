@@ -42,17 +42,36 @@ class MergeMembersRequest(BaseModel):
     target_member_id: uuid.UUID
 
 
-def check_project_access(project: Optional[Project], user: User) -> Project:
+def check_project_access(
+    project: Optional[Project],
+    user: User,
+    db: Optional[Session] = None,
+    write: bool = False,
+) -> Project:
     """
-    Enforces authorization: users see only their own projects (admins: all).
-    Returns 404 if project does not exist or user is unauthorized.
+    Enforces authorization:
+      - Admins and project owners have full access.
+      - Assigned faculty have read-only access (write=False).
+      - Other users/unassigned faculty get 404 (prevents existence leakage).
     """
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    if user.role != UserRole.admin and project.owner_id != user.id:
-        # Return 404 rather than 403 to prevent existence leakage
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    return project
+    if user.role == UserRole.admin or project.owner_id == user.id:
+        return project
+    if not write and user.role == UserRole.faculty and db is not None:
+        from app.models.faculty import ProjectFaculty
+        is_assigned = (
+            db.query(ProjectFaculty)
+            .filter(
+                ProjectFaculty.project_id == project.id,
+                ProjectFaculty.faculty_user_id == user.id,
+            )
+            .first()
+            is not None
+        )
+        if is_assigned:
+            return project
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -203,7 +222,7 @@ def get_project_detail(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, db=db, write=False)
 
     members_count = db.query(func.count(Member.id)).filter(Member.project_id == id).scalar() or 0
     prs_count = db.query(func.count(PullRequest.id)).filter(PullRequest.project_id == id).scalar() or 0
@@ -236,7 +255,7 @@ def recollect_project(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, write=True)
 
     if project.status == ProjectStatus.analyzing:
         raise HTTPException(
@@ -259,7 +278,7 @@ def delete_project(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, write=True)
 
     # Delete on-disk bare clone
     if project.clone_path and os.path.exists(project.clone_path):
@@ -277,7 +296,7 @@ def get_project_members(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, db=db, write=False)
 
     members = db.query(Member).filter(Member.project_id == id).all()
 
@@ -366,7 +385,7 @@ def get_project_aliases(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, db=db, write=False)
 
     query = db.query(AuthorAlias).filter(AuthorAlias.project_id == id)
     if linked is False:
@@ -398,7 +417,7 @@ def assign_alias(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, write=True)
 
     alias = db.query(AuthorAlias).filter(
         AuthorAlias.id == alias_id,
@@ -463,7 +482,7 @@ def merge_members(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, write=True)
 
     if payload.source_member_id == payload.target_member_id:
         raise HTTPException(
@@ -545,7 +564,7 @@ def get_project_commits(
     db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == id).first()
-    check_project_access(project, current_user)
+    check_project_access(project, current_user, db=db, write=False)
 
     commits = (
         db.query(Commit)

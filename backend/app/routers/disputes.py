@@ -13,6 +13,7 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
 from app.models.disputes import Dispute, DisputeStatus
+from app.models.faculty import ProjectFaculty
 from app.models.members import Member
 from app.models.projects import Project
 from app.models.users import User, UserRole
@@ -145,9 +146,19 @@ def list_disputes(
 
     is_admin = current_user.role == UserRole.admin
     is_owner = project.owner_id == current_user.id
+    is_assigned_faculty = (
+        current_user.role == UserRole.faculty
+        and db.query(ProjectFaculty)
+        .filter(
+            ProjectFaculty.project_id == id,
+            ProjectFaculty.faculty_user_id == current_user.id,
+        )
+        .first()
+        is not None
+    )
 
     query = db.query(Dispute).filter(Dispute.project_id == id)
-    if not (is_admin or is_owner):
+    if not (is_admin or is_owner or is_assigned_faculty):
         # Regular users only see disputes they raised
         query = query.filter(Dispute.raised_by == current_user.id)
 
@@ -195,8 +206,18 @@ def resolve_dispute(
 
     is_admin = current_user.role == UserRole.admin
     is_owner = project.owner_id == current_user.id
+    is_assigned_faculty = (
+        current_user.role == UserRole.faculty
+        and db.query(ProjectFaculty)
+        .filter(
+            ProjectFaculty.project_id == id,
+            ProjectFaculty.faculty_user_id == current_user.id,
+        )
+        .first()
+        is not None
+    )
 
-    if not (is_admin or is_owner):
+    if not (is_admin or is_owner or is_assigned_faculty):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
     dispute = db.query(Dispute).filter(Dispute.id == dispute_id, Dispute.project_id == id).first()

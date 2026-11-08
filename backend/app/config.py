@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     MAX_DISPUTE_TEXT: int = 1000
     MAX_OPEN_DISPUTES_PER_USER: int = 5
 
+    # Section 5 settings
+    ANTHROPIC_API_KEY: Optional[str] = None
+    SUMMARY_MODEL: str = "claude-sonnet-4-5"
+    SUMMARY_MAX_TOKENS: int = 600
+    ORIGINALITY_MIN_SHARED_LINES: int = 40
+    ORIGINALITY_KGRAM: int = 8
+    ORIGINALITY_WINDOW: int = 4
+
     @model_validator(mode="after")
     def validate_and_normalize_weights(self):
         w_surv = self.SCORE_WEIGHT_SURVIVAL

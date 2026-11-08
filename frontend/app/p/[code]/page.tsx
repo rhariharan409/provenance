@@ -67,7 +67,7 @@ export default async function PassportPage({ params }: PassportPageProps) {
           <header className="passport-section border-b border-border pb-6 flex flex-col sm:flex-row justify-between sm:items-start gap-4">
             <div>
               <p className="text-[12px] uppercase tracking-wider text-text-muted font-medium mb-1">
-                Verified Record
+                Evidence-backed record
               </p>
               <h1 className="font-serif text-3xl font-semibold text-text tracking-tight">
                 Contribution Passport

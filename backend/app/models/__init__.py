@@ -10,6 +10,9 @@ from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
 from app.models.contribution_scores import ContributionScore, ScoreConfidence
 from app.models.passports import Passport
 from app.models.disputes import Dispute, DisputeStatus
+from app.models.faculty import ProjectFaculty
+from app.models.summaries import MemberSummary, SummaryMethod
+from app.models.originality import Fingerprint, OriginalityMatch
 
 __all__ = [
     "Base",
@@ -31,4 +34,9 @@ __all__ = [
     "Passport",
     "Dispute",
     "DisputeStatus",
+    "ProjectFaculty",
+    "MemberSummary",
+    "SummaryMethod",
+    "Fingerprint",
+    "OriginalityMatch",
 ]

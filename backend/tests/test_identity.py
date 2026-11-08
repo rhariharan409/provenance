@@ -244,9 +244,10 @@ def test_case_insensitive_member_deduplication_devendiran(db_session, test_user)
         project_id=project.id,
         resolved_aliases=resolved,
         commits=[commit_1],
-        pr_extra_logins=["DEVONDIRAN2007"],
+        pr_extra_logins=["DEVENDIRAN2007"],
     )
     members_after = db_session.query(Member).filter(Member.project_id == project.id).all()
     assert len(members_after) == 1
+    assert members_after[0].github_login == "devendiran2007"
 
 

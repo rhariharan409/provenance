@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.deps import get_current_user
 from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
@@ -164,6 +165,18 @@ def get_project_summaries(
         query = query.filter(MemberSummary.member_id == user_member_id)
 
     summaries = query.all()
+
+    # Contributor presentation cap
+    if is_privileged:
+        run_scores = (
+            db.query(ContributionScore)
+            .filter(ContributionScore.run_id == latest_run.id)
+            .order_by(ContributionScore.share_percent.desc())
+            .all()
+        )
+        if len(run_scores) > settings.MAX_CONTRIBUTORS_SHOWN:
+            top_member_ids = {s.member_id for s in run_scores[:settings.MAX_CONTRIBUTORS_SHOWN]}
+            summaries = [s for s in summaries if s.member_id in top_member_ids]
 
     return [
         {

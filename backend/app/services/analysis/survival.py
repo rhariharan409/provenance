@@ -106,3 +106,52 @@ def process_file_blame(
 
     return file_meaningful_count
 
+
+def extract_file_blame_result(file_path: str, blame_output: str) -> Dict[str, int]:
+    """
+    Parses blame output and classifies meaningful lines.
+    Returns {author_email: surviving_meaningful_line_count}.
+    """
+    parsed = parse_git_blame_porcelain(blame_output)
+    if not parsed:
+        return {}
+    raw_lines = [item[2] for item in parsed]
+    meaningful_flags = classify_lines(file_path, raw_lines)
+    email_counts: Dict[str, int] = {}
+    for idx, (email, _, _) in enumerate(parsed):
+        if meaningful_flags[idx]:
+            e = email.lower()
+            email_counts[e] = email_counts.get(e, 0) + 1
+    return email_counts
+
+
+def apply_blame_result_to_survival(
+    file_path: str,
+    author_counts: Dict[str, int],
+    alias_lookup_fn: Callable[[str, str], Optional[str]],
+    results: ProjectSurvivalResults,
+) -> int:
+    """
+    Applies per-author meaningful line counts to ProjectSurvivalResults.
+    """
+    module = get_top_level_module(file_path)
+    file_meaningful = 0
+    for email, count in author_counts.items():
+        if count <= 0:
+            continue
+        file_meaningful += count
+        results.total_surviving_lines += count
+        results.module_totals[module] = results.module_totals.get(module, 0) + count
+        results.file_totals[file_path] = results.file_totals.get(file_path, 0) + count
+
+        member_id = alias_lookup_fn(email, "")
+        if member_id:
+            m_data = results.get_or_create_member(member_id)
+            m_data.total_lines += count
+            m_data.file_lines[file_path] = m_data.file_lines.get(file_path, 0) + count
+            m_data.module_lines[module] = m_data.module_lines.get(module, 0) + count
+        else:
+            results.unlinked_surviving_lines += count
+            results.unlinked_authors.add(email)
+    return file_meaningful
+

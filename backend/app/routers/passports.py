@@ -231,6 +231,8 @@ def publish_passport(
         members_with_active_passports=members_with_active_passports,
         scoring_version=latest_run.scoring_version or "1.0",
         weights=latest_run.weights or {},
+        history_since=project.history_since,
+        project_flags=(latest_run.stats or {}).get("project_flags", []),
     )
 
     # Compute HMAC-SHA256 seal

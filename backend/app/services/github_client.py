@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 import jwt
 import httpx
@@ -223,6 +224,35 @@ class GitHubClient:
                         )
 
             return data, warnings
+
+    def get_approximate_commit_count(
+        self,
+        owner: str,
+        repo: str,
+        token: Optional[str] = None
+    ) -> Optional[int]:
+        """
+        Requests commits with per_page=1 and reads the Link header's last page number,
+        or falls back to null.
+        """
+        try:
+            with self._create_client(token) as client:
+                resp = client.get(
+                    f"{self.base_url}/repos/{owner}/{repo}/commits",
+                    params={"per_page": 1}
+                )
+                if resp.status_code == 200:
+                    link_header = resp.headers.get("Link") or resp.headers.get("link")
+                    if link_header:
+                        match = re.search(r'[?&]page=(\d+)[^>]*>;\s*rel="last"', link_header)
+                        if match:
+                            return int(match.group(1))
+                    items = resp.json()
+                    if isinstance(items, list):
+                        return len(items)
+        except Exception as e:
+            logger.debug("Failed to get commit count via Link header for %s/%s: %s", owner, repo, e)
+        return None
 
     def list_commits(
         self,

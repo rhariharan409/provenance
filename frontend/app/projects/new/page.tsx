@@ -1,17 +1,43 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { createProject } from "@/lib/api";
+import { createProject, estimateProject, RepoEstimate } from "@/lib/api";
 
 export default function NewProjectPage() {
   const router = useRouter();
   const [repoUrl, setRepoUrl] = useState("");
-  const [historyWindow, setHistoryWindow] = useState("all");
+  const [historyMonths, setHistoryMonths] = useState<number>(0);
+  const [estimate, setEstimate] = useState<RepoEstimate | null>(null);
+  const [estimating, setEstimating] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
+
+  // Debounced estimation when URL looks valid
+  useEffect(() => {
+    const trimmed = repoUrl.trim();
+    const timer = setTimeout(async () => {
+      if (!trimmed.startsWith("https://github.com/") || trimmed.split("/").length < 5) {
+        setEstimate(null);
+        return;
+      }
+      setEstimating(true);
+      const est = await estimateProject(trimmed);
+      setEstimating(false);
+      if (est) {
+        setEstimate(est);
+        if (est.recommendation === "window") {
+          setHistoryMonths(12);
+        } else {
+          setHistoryMonths(0);
+        }
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [repoUrl]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -22,8 +48,8 @@ export default function NewProjectPage() {
     setInstallUrl(null);
 
     try {
-      const res = await createProject(repoUrl.trim(), historyWindow);
-      if (res.ok && res.data?.id) {
+      const res = await createProject(repoUrl.trim(), historyMonths);
+      if (res.ok && res.data && typeof res.data.id === "string") {
         router.push(`/projects/${res.data.id}`);
       } else {
         setError(res.error || "Failed to add project.");
@@ -109,25 +135,62 @@ export default function NewProjectPage() {
               </p>
             </div>
 
+            {estimating && (
+              <div className="p-3 bg-bg border border-border rounded-[4px] text-[12px] text-text-muted font-mono animate-pulse">
+                Estimating repository size and commits...
+              </div>
+            )}
+
+            {estimate && !estimating && (
+              <div className="p-3 bg-bg border border-border rounded-[4px] text-[13px] space-y-1 font-mono">
+                <div className="flex justify-between">
+                  <span className="text-text-muted">Repository size:</span>
+                  <span className="text-text font-medium">{estimate.repo_size_mb} MB</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-text-muted">Approximate commits:</span>
+                  <span className="text-text font-medium">
+                    {estimate.approximate_commits !== null
+                      ? estimate.approximate_commits.toLocaleString()
+                      : "Unknown"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-text-muted">Default branch:</span>
+                  <span className="text-text font-medium">{estimate.default_branch}</span>
+                </div>
+                <div className="flex justify-between pt-1 border-t border-border">
+                  <span className="text-text-muted">Recommendation:</span>
+                  <span className="text-accent font-medium">
+                    {estimate.recommendation === "window"
+                      ? "Window recommended (Large repo)"
+                      : "Full history"}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div>
               <label
                 htmlFor="history_window"
                 className="block text-[12px] font-medium uppercase tracking-wider text-text-muted mb-1.5"
               >
-                History window
+                History to analyze
               </label>
               <select
                 id="history_window"
-                value={historyWindow}
-                onChange={(e) => setHistoryWindow(e.target.value)}
+                value={historyMonths}
+                onChange={(e) => setHistoryMonths(Number(e.target.value))}
                 className="w-full h-[36px] px-3 font-mono text-[13px] bg-surface border border-border rounded-[4px] text-text focus:outline-none focus:border-border-strong"
               >
-                <option value="all">All history (full project timeline)</option>
-                <option value="12m">Last 12 months</option>
-                <option value="6m">Last 6 months</option>
+                <option value={0}>All history</option>
+                <option value={24}>Last 24 months</option>
+                <option value={12}>Last 12 months</option>
+                <option value={6}>Last 6 months</option>
+                <option value={3}>Last 3 months</option>
               </select>
               <p className="mt-2 text-[12px] text-text-muted">
-                Limit the commit history read and analyzed to focus on recent contributions and speed up processing.
+                Large repositories are analyzed over a shorter window to stay fast. You can re-run with a different window later.
               </p>
             </div>
 
@@ -152,4 +215,3 @@ export default function NewProjectPage() {
     </div>
   );
 }
-

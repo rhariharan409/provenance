@@ -10,6 +10,8 @@ FLAG_MESSAGES: Dict[str, str] = {
     "no_collaboration_data": "No pull requests or reviews found; collaboration weight redistributed to other signals.",
     "rewritten_history_suspected": "Commit timestamps show non-chronological parent relationships exceeding 30 days.",
     "bot_excluded": "Automated bot accounts were detected and excluded from contribution scores.",
+    "window_applied": "Time window applied: recent commit history was analyzed.",
+    "partial_file_coverage": "Large repository: the most-changed source files were analyzed.",
 }
 
 

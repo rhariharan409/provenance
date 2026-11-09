@@ -1,6 +1,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import io
 import logging
 import os
 import re
@@ -9,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 import uuid
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.services.identity import (
     resolve_identities,
     sync_identities_and_commits_to_db,
 )
+from app.services.progress import record_step_timing, set_progress
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,17 @@ GITHUB_URL_PATTERN = re.compile(
 # Concurrency semaphore: max 2 concurrent runs
 COLLECTION_SEMAPHORE = threading.Semaphore(2)
 
+# Per-project execution lock for collector
+_COLLECTOR_PROJECT_LOCKS: Dict[uuid.UUID, threading.Lock] = {}
+_COLLECTOR_LOCKS_GUARD = threading.Lock()
+
+
+def _get_project_lock(project_id: uuid.UUID) -> threading.Lock:
+    with _COLLECTOR_LOCKS_GUARD:
+        if project_id not in _COLLECTOR_PROJECT_LOCKS:
+            _COLLECTOR_PROJECT_LOCKS[project_id] = threading.Lock()
+        return _COLLECTOR_PROJECT_LOCKS[project_id]
+
 
 def _parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
@@ -123,71 +136,81 @@ def validate_and_parse_github_url(url: str) -> Tuple[str, str, str]:
     return owner, repo, canonical_url
 
 
-def parse_git_log_output(output: str) -> List[RawCommitData]:
+def stream_git_log_commits(stream: Iterator[str]) -> Iterator[RawCommitData]:
     """
     Parses machine-readable git log output formatted with Unit Separator (\x1f)
     and Record Separator (\x1e):
     --format=\x1e%H\x1f%an\x1f%ae\x1f%aI\x1f%s\x1f%P
     Followed by numstat lines.
+    Streams commits line-by-line without buffering full output in memory.
     """
-    commits: List[RawCommitData] = []
-    if not output:
-        return commits
+    current_commit: Optional[RawCommitData] = None
 
-    records = output.split("\x1e")
-    for record in records:
-        trimmed = record.strip()
-        if not trimmed:
+    for raw_line in stream:
+        line = raw_line.strip("\r\n")
+        if not line:
             continue
 
-        lines = trimmed.split("\n")
-        header_line = lines[0].strip()
-        parts = header_line.split("\x1f")
-        if len(parts) < 5:
-            continue
+        if "\x1e" in line:
+            # New commit record begins
+            parts_rec = line.split("\x1e")
+            if current_commit is not None:
+                yield current_commit
+                current_commit = None
 
-        sha = parts[0].strip()
-        author_name = parts[1].strip()
-        author_email = parts[2].strip()
-        authored_date_str = parts[3].strip()
-        subject = parts[4].strip()
-        parents_str = parts[5].strip() if len(parts) >= 6 else ""
+            header_str = parts_rec[-1].strip()
+            if not header_str:
+                continue
 
-        authored_at = _parse_iso_datetime(authored_date_str) or datetime.now(timezone.utc)
+            parts = header_str.split("\x1f")
+            if len(parts) < 5:
+                continue
 
-        parents = parents_str.split() if parents_str else []
-        parent_count = len(parents)
+            sha = parts[0].strip()
+            author_name = parts[1].strip()
+            author_email = parts[2].strip()
+            authored_date_str = parts[3].strip()
+            subject = parts[4].strip()
+            parents_str = parts[5].strip() if len(parts) >= 6 else ""
 
-        additions = 0
-        deletions = 0
-        files_changed = 0
+            authored_at = _parse_iso_datetime(authored_date_str) or datetime.now(timezone.utc)
+            parents = parents_str.split() if parents_str else []
+            parent_count = len(parents)
 
-        # Parse numstat lines
-        for numstat_line in lines[1:]:
-            stat_parts = numstat_line.strip().split("\t")
-            if len(stat_parts) >= 3:
-                files_changed += 1
-                add_str, del_str = stat_parts[0], stat_parts[1]
-                if add_str.isdigit():
-                    additions += int(add_str)
-                if del_str.isdigit():
-                    deletions += int(del_str)
-
-        commits.append(
-            RawCommitData(
+            current_commit = RawCommitData(
                 sha=sha,
                 author_name=author_name,
                 author_email=author_email,
                 authored_at=authored_at,
                 subject=subject,
-                additions=additions,
-                deletions=deletions,
-                files_changed=files_changed,
+                additions=0,
+                deletions=0,
+                files_changed=0,
                 parent_count=parent_count,
             )
-        )
+        elif current_commit is not None:
+            # Numstat line for current commit
+            stat_parts = line.strip().split("\t")
+            if len(stat_parts) >= 3:
+                current_commit.files_changed += 1
+                add_str, del_str = stat_parts[0], stat_parts[1]
+                if add_str.isdigit():
+                    current_commit.additions += int(add_str)
+                if del_str.isdigit():
+                    current_commit.deletions += int(del_str)
 
-    return commits
+    if current_commit is not None:
+        yield current_commit
+
+
+def parse_git_log_output(output: str) -> List[RawCommitData]:
+    """
+    Parses machine-readable git log output.
+    Kept for backward-compatibility with existing tests and callers.
+    """
+    if not output:
+        return []
+    return list(stream_git_log_commits(io.StringIO(output)))
 
 
 def run_collection(
@@ -265,7 +288,8 @@ def run_collection(
                 project.github_installation_id = auth_res.installation_id
 
             max_size_kb = settings.MAX_REPO_SIZE_MB * 1024
-            if size_kb > max_size_kb:
+            has_window = bool(project.history_since or getattr(project, "history_window_months", None))
+            if size_kb > max_size_kb and not has_window:
                 size_mb = round(size_kb / 1024, 1)
                 project.status = ProjectStatus.failed
                 project.error_message = (
@@ -276,104 +300,81 @@ def run_collection(
 
             db.commit()
             t_auth_elapsed = time.time() - t_auth_start
-            timing_summary["auth_metadata"] = round(t_auth_elapsed, 3)
-            logger.info("Timing [Collection] auth_metadata: %.2fs", t_auth_elapsed)
+            timing_summary["estimate"] = round(t_auth_elapsed, 3)
+            record_step_timing(project.id, "estimate", timing_summary["estimate"], db_factory=db_factory)
+            logger.info("Timing [Collection] estimate: %.2fs", t_auth_elapsed)
 
-            # Step 2: Clone or Fetch repository bare
-            t_clone_start = time.time()
-            os.makedirs(settings.REPO_STORAGE_PATH, exist_ok=True)
-            clone_path = os.path.abspath(
-                os.path.join(settings.REPO_STORAGE_PATH, f"{project.id}.git")
-            )
-            project.clone_path = clone_path
-
-            temp_hooks_dir = tempfile.mkdtemp(prefix="git_empty_hooks_")
-
-            clone_env = os.environ.copy()
-            clone_env["GIT_TERMINAL_PROMPT"] = "0"
-
-            if auth_res.installation_id and token:
-                auth_header = f"Authorization: Basic {base64.b64encode(f'x-access-token:{token}'.encode()).decode()}"
-                clone_env["GIT_CONFIG_COUNT"] = "1"
-                clone_env["GIT_CONFIG_KEY_0"] = "http.extraheader"
-                clone_env["GIT_CONFIG_VALUE_0"] = auth_header
-
-            is_incremental = bool(os.path.exists(clone_path) and os.path.exists(os.path.join(clone_path, "HEAD")))
-            clone_success = False
-
-            if is_incremental:
-                _update_project_progress(db, project, "Fetching repository updates...", 15)
-                fetch_cmd = [
-                    "git",
-                    "--git-dir",
-                    clone_path,
-                    "-c",
-                    f"core.hooksPath={temp_hooks_dir}",
-                    "-c",
-                    "protocol.file.allow=never",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "fetch",
-                    "--prune",
-                    "origin",
-                    "+refs/heads/*:refs/heads/*",
-                ]
-                fetch_proc = subprocess.run(
-                    fetch_cmd,
-                    env=clone_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=settings.CLONE_TIMEOUT_SECONDS,
-                    shell=False,
+            # Step 2: Clone or Fetch repository bare (protected with per-project lock)
+            proj_lock = _get_project_lock(project.id)
+            with proj_lock:
+                t_clone_start = time.time()
+                os.makedirs(settings.REPO_STORAGE_PATH, exist_ok=True)
+                clone_path = os.path.abspath(
+                    os.path.join(settings.REPO_STORAGE_PATH, f"{project.id}.git")
                 )
-                if fetch_proc.returncode == 0:
-                    clone_success = True
-                else:
-                    logger.warning("Incremental git fetch failed, falling back to clean clone: %s", fetch_proc.stderr[:200])
-                    is_incremental = False
+                project.clone_path = clone_path
+
+                temp_hooks_dir = tempfile.mkdtemp(prefix="git_empty_hooks_")
+
+                clone_env = os.environ.copy()
+                clone_env["GIT_TERMINAL_PROMPT"] = "0"
+
+                if auth_res.installation_id and token:
+                    auth_header = f"Authorization: Basic {base64.b64encode(f'x-access-token:{token}'.encode()).decode()}"
+                    clone_env["GIT_CONFIG_COUNT"] = "1"
+                    clone_env["GIT_CONFIG_KEY_0"] = "http.extraheader"
+                    clone_env["GIT_CONFIG_VALUE_0"] = auth_header
+
+                is_incremental = bool(os.path.exists(clone_path) and os.path.exists(os.path.join(clone_path, "HEAD")))
+                clone_success = False
+                clone_mode = getattr(project, "clone_mode", None)
+
+                if is_incremental:
+                    set_progress(project.id, "Fetching repository updates...", 0, 100, db_factory=db_factory)
+                    fetch_cmd = [
+                        "git",
+                        "--git-dir",
+                        clone_path,
+                        "-c",
+                        f"core.hooksPath={temp_hooks_dir}",
+                        "-c",
+                        "protocol.file.allow=never",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "fetch",
+                        "--prune",
+                        "origin",
+                        "+refs/heads/*:refs/heads/*",
+                    ]
+                    fetch_proc = subprocess.run(
+                        fetch_cmd,
+                        env=clone_env,
+                        capture_output=True,
+                        text=True,
+                        timeout=settings.CLONE_TIMEOUT_SECONDS,
+                        shell=False,
+                    )
+                    if fetch_proc.returncode == 0:
+                        clone_success = True
+                        clone_mode = clone_mode or "partial"
+                    else:
+                        logger.warning("Incremental git fetch failed, falling back to clean clone: %s", fetch_proc.stderr[:200])
+                        is_incremental = False
+                        _safe_rmtree(clone_path)
+
+                if not clone_success:
                     _safe_rmtree(clone_path)
+                    if getattr(project, "last_collected_at", None) is not None:
+                        set_progress(project.id, "Re-collecting repository history...", 0, 100, db_factory=db_factory)
+                    else:
+                        set_progress(project.id, "Cloning repository...", 0, 100, db_factory=db_factory)
 
-            if not clone_success:
-                _safe_rmtree(clone_path)
-                if getattr(project, "last_collected_at", None) is not None:
-                    _update_project_progress(db, project, "Re-collecting repository history...", 15)
-                else:
-                    _update_project_progress(db, project, "Cloning repository...", 15)
-
-                # Attempt 1: Partial clone with --filter=blob:none --no-checkout --bare
-                partial_clone_cmd = [
-                    "git",
-                    "clone",
-                    "--filter=blob:none",
-                    "--no-checkout",
-                    "--bare",
-                    "-c",
-                    f"core.hooksPath={temp_hooks_dir}",
-                    "-c",
-                    "protocol.file.allow=never",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "--",
-                    f"https://github.com/{owner}/{repo}.git",
-                    clone_path,
-                ]
-                proc = subprocess.run(
-                    partial_clone_cmd,
-                    env=clone_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=settings.CLONE_TIMEOUT_SECONDS,
-                    shell=False,
-                )
-
-                if proc.returncode != 0:
-                    logger.warning("Partial clone failed (%s); falling back to full bare clone", proc.stderr[:200])
-                    all_warnings.append("Server rejected partial clone (--filter=blob:none); fell back to full bare clone.")
-                    _safe_rmtree(clone_path)
-                    # Attempt 2: Fallback to standard full bare clone
-                    full_clone_cmd = [
+                    # Attempt 1: Partial clone with --filter=blob:none --no-checkout --bare
+                    partial_clone_cmd = [
                         "git",
                         "clone",
+                        "--filter=blob:none",
+                        "--no-checkout",
                         "--bare",
                         "-c",
                         f"core.hooksPath={temp_hooks_dir}",
@@ -381,12 +382,14 @@ def run_collection(
                         "protocol.file.allow=never",
                         "-c",
                         "core.fsmonitor=false",
-                        "--",
-                        f"https://github.com/{owner}/{repo}.git",
-                        clone_path,
                     ]
+                    if project.history_since:
+                        shallow_date = project.history_since.strftime("%Y-%m-%d")
+                        partial_clone_cmd.append(f"--shallow-since={shallow_date}")
+                    partial_clone_cmd.extend(["--", f"https://github.com/{owner}/{repo}.git", clone_path])
+
                     proc = subprocess.run(
-                        full_clone_cmd,
+                        partial_clone_cmd,
                         env=clone_env,
                         capture_output=True,
                         text=True,
@@ -394,87 +397,192 @@ def run_collection(
                         shell=False,
                     )
 
-                if proc.returncode != 0:
-                    project.status = ProjectStatus.failed
-                    secrets_to_mask = [token, settings.GITHUB_API_TOKEN]
-                    project.error_message = _sanitize_git_error(proc.stderr, secrets_to_mask)
-                    db.commit()
-                    return
+                    # If shallow-since failed, retry partial without shallow-since
+                    if proc.returncode != 0 and project.history_since:
+                        _safe_rmtree(clone_path)
+                        retry_partial = [
+                            "git",
+                            "clone",
+                            "--filter=blob:none",
+                            "--no-checkout",
+                            "--bare",
+                            "-c",
+                            f"core.hooksPath={temp_hooks_dir}",
+                            "-c",
+                            "protocol.file.allow=never",
+                            "-c",
+                            "core.fsmonitor=false",
+                            "--",
+                            f"https://github.com/{owner}/{repo}.git",
+                            clone_path,
+                        ]
+                        proc = subprocess.run(
+                            retry_partial,
+                            env=clone_env,
+                            capture_output=True,
+                            text=True,
+                            timeout=settings.CLONE_TIMEOUT_SECONDS,
+                            shell=False,
+                        )
 
-            t_clone_elapsed = time.time() - t_clone_start
-            timing_summary["clone_or_fetch"] = round(t_clone_elapsed, 3)
-            logger.info("Timing [Collection] clone_or_fetch: %.2fs", t_clone_elapsed)
+                    if proc.returncode == 0:
+                        clone_success = True
+                        clone_mode = "partial"
+                        project.clone_mode = "partial"
+                    else:
+                        logger.warning("Partial clone failed (%s); falling back to full bare clone", proc.stderr[:200])
+                        all_warnings.append("Server rejected partial clone (--filter=blob:none); fell back to full bare clone.")
+                        clone_mode = "full"
+                        project.clone_mode = "full"
+                        _safe_rmtree(clone_path)
+                        full_clone_cmd = [
+                            "git",
+                            "clone",
+                            "--bare",
+                            "-c",
+                            f"core.hooksPath={temp_hooks_dir}",
+                            "-c",
+                            "protocol.file.allow=never",
+                            "-c",
+                            "core.fsmonitor=false",
+                            "--",
+                            f"https://github.com/{owner}/{repo}.git",
+                            clone_path,
+                        ]
+                        proc = subprocess.run(
+                            full_clone_cmd,
+                            env=clone_env,
+                            capture_output=True,
+                            text=True,
+                            timeout=settings.CLONE_TIMEOUT_SECONDS,
+                            shell=False,
+                        )
 
-            # Step 3: Read commit history locally via git log
-            _update_project_progress(db, project, "Reading commits...", 30)
-            t_log_start = time.time()
+                    if proc.returncode != 0:
+                        project.status = ProjectStatus.failed
+                        secrets_to_mask = [token, settings.GITHUB_API_TOKEN]
+                        project.error_message = _sanitize_git_error(proc.stderr, secrets_to_mask)
+                        db.commit()
+                        return
 
-            since_filter: Optional[str] = None
-            if is_incremental and project.last_collected_at:
-                since_filter = project.last_collected_at.isoformat()
-            elif project.history_since:
-                since_filter = project.history_since.isoformat()
+                project.clone_mode = clone_mode
+                t_clone_elapsed = round(time.time() - t_clone_start, 3)
+                timing_summary["clone"] = t_clone_elapsed
+                record_step_timing(project.id, "clone", t_clone_elapsed, db_factory=db_factory)
+                logger.info("Timing [Collection] clone: %.2fs", t_clone_elapsed)
 
-            log_format = "\x1e%H\x1f%an\x1f%ae\x1f%aI\x1f%s\x1f%P"
-            log_cmd = [
-                "git",
-                "--git-dir",
-                clone_path,
-                "log",
-                default_branch,
-                f"-n{settings.MAX_COMMITS + 1}",
-                "--numstat",
-                f"--format={log_format}",
-            ]
-            if since_filter:
-                log_cmd.append(f"--since={since_filter}")
+                # Step 3: Read commit history locally via streaming git log
+                set_progress(project.id, "Reading commits...", 0, 100, db_factory=db_factory)
+                t_log_start = time.time()
 
-            log_proc = subprocess.run(
-                log_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-                shell=False,
-            )
+                since_filter: Optional[str] = None
+                revision_range = default_branch
+                if is_incremental and project.last_collected_at:
+                    latest_commit = (
+                        db.query(Commit.sha)
+                        .filter(Commit.project_id == project.id)
+                        .order_by(Commit.authored_at.desc())
+                        .first()
+                    )
+                    if latest_commit:
+                        old_head = latest_commit[0]
+                        chk = subprocess.run(
+                            ["git", "--git-dir", clone_path, "cat-file", "-e", old_head],
+                            capture_output=True,
+                            shell=False,
+                        )
+                        if chk.returncode == 0:
+                            revision_range = f"{old_head}..{default_branch}"
+                elif project.history_since:
+                    since_filter = project.history_since.isoformat()
 
-            if log_proc.returncode != 0:
-                project.status = ProjectStatus.failed
-                project.error_message = "Failed to parse commit history from repository."
-                db.commit()
-                return
+                log_format = "\x1e%H\x1f%an\x1f%ae\x1f%aI\x1f%s\x1f%P"
+                log_cmd = [
+                    "git",
+                    "--git-dir",
+                    clone_path,
+                    "log",
+                    revision_range,
+                    f"-n{settings.MAX_COMMITS + 1}",
+                    "--numstat",
+                    f"--format={log_format}",
+                ]
+                if since_filter:
+                    log_cmd.append(f"--since={since_filter}")
 
-            raw_commits = parse_git_log_output(log_proc.stdout)
-            if len(raw_commits) > settings.MAX_COMMITS:
-                raw_commits = raw_commits[: settings.MAX_COMMITS]
-                all_warnings.append(
-                    f"Commit count capped at maximum limit of {settings.MAX_COMMITS} commits."
+                log_proc = subprocess.Popen(
+                    log_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    shell=False,
                 )
 
-            t_log_elapsed = time.time() - t_log_start
-            timing_summary["git_log"] = round(t_log_elapsed, 3)
-            logger.info("Timing [Collection] git_log: %.2fs", t_log_elapsed)
-            _update_project_progress(db, project, f"Reading commits {len(raw_commits)} of {len(raw_commits)}", 40)
+                raw_commits: List[RawCommitData] = []
+                capped = False
+                est_total = getattr(project, "estimated_commits", None) or 500
 
-            # Step 4: API enrichment (commits & pull requests) concurrently
-            _update_project_progress(db, project, "Fetching pull requests & reviews...", 45)
-            t_api_start = time.time()
+                if log_proc.stdout:
+                    for commit_item in stream_git_log_commits(log_proc.stdout):
+                        if len(raw_commits) >= settings.MAX_COMMITS:
+                            capped = True
+                            try:
+                                log_proc.terminate()
+                                log_proc.wait(timeout=3)
+                            except Exception:
+                                pass
+                            break
+                        raw_commits.append(commit_item)
+                        if len(raw_commits) % 500 == 0:
+                            set_progress(
+                                project.id,
+                                f"Reading commits {len(raw_commits)} of {max(len(raw_commits), est_total)}",
+                                len(raw_commits),
+                                max(len(raw_commits), est_total),
+                                db_factory=db_factory,
+                            )
 
-            with ThreadPoolExecutor(max_workers=2) as api_pool:
-                future_commits = api_pool.submit(
-                    client.list_commits, owner, repo, token, settings.MAX_COMMITS
+                log_proc.wait()
+                if capped:
+                    all_warnings.append(
+                        f"Commit count capped at maximum limit of {settings.MAX_COMMITS} commits."
+                    )
+
+                t_log_elapsed = round(time.time() - t_log_start, 3)
+                timing_summary["read_history"] = t_log_elapsed
+                record_step_timing(project.id, "read_history", t_log_elapsed, db_factory=db_factory)
+                logger.info("Timing [Collection] read_history: %.2fs", t_log_elapsed)
+                set_progress(
+                    project.id,
+                    f"Reading commits {len(raw_commits)} of {len(raw_commits)}",
+                    len(raw_commits),
+                    len(raw_commits),
+                    db_factory=db_factory,
                 )
-                future_prs = api_pool.submit(
-                    client.list_pull_requests_and_reviews, owner, repo, token, settings.MAX_PULL_REQUESTS
-                )
-                sha_to_login, commit_warns = future_commits.result()
-                prs_data, pr_warns = future_prs.result()
 
-            all_warnings.extend(commit_warns)
-            all_warnings.extend(pr_warns)
+                # Step 4: API enrichment (commits & pull requests) concurrently
+                set_progress(project.id, "Fetching pull requests & reviews...", 0, 100, db_factory=db_factory)
+                t_api_start = time.time()
 
-            t_api_elapsed = time.time() - t_api_start
+                with ThreadPoolExecutor(max_workers=settings.FETCH_WORKERS) as api_pool:
+                    future_commits = api_pool.submit(
+                        client.list_commits, owner, repo, token, settings.MAX_COMMITS
+                    )
+                    future_prs = api_pool.submit(
+                        client.list_pull_requests_and_reviews, owner, repo, token, settings.MAX_PULL_REQUESTS
+                    )
+                    sha_to_login, commit_warns = future_commits.result()
+                    prs_data, pr_warns = future_prs.result()
+
+                all_warnings.extend(commit_warns)
+                all_warnings.extend(pr_warns)
+
+                t_api_elapsed = round(time.time() - t_api_start, 3)
+                timing_summary["api_enrichment"] = t_api_elapsed
+                record_step_timing(project.id, "api_enrichment", t_api_elapsed, db_factory=db_factory)
+                logger.info("Timing [Collection] api_enrichment: %.2fs", t_api_elapsed)
             timing_summary["github_api"] = round(t_api_elapsed, 3)
             logger.info("Timing [Collection] github_api: %.2fs", t_api_elapsed)
 
@@ -576,8 +684,9 @@ def run_collection(
             )
 
             t_sync_elapsed = time.time() - t_sync_start
-            timing_summary["identity_sync"] = round(t_sync_elapsed, 3)
-            logger.info("Timing [Collection] identity_sync: %.2fs", t_sync_elapsed)
+            timing_summary["identity"] = round(t_sync_elapsed, 3)
+            record_step_timing(project.id, "identity", timing_summary["identity"], db_factory=db_factory)
+            logger.info("Timing [Collection] identity: %.2fs", t_sync_elapsed)
 
             # Step 6: Mark project ready and store timings
             t_total_elapsed = round(time.time() - t_collection_start, 3)
@@ -587,6 +696,7 @@ def run_collection(
             current_timing_stats = dict(project.timing_stats) if project.timing_stats else {}
             current_timing_stats["collection"] = timing_summary
             project.timing_stats = current_timing_stats
+            project.timings = current_timing_stats
 
             deduped_warnings = list(dict.fromkeys(w for w in all_warnings if w))
             total_stored_commits = db.query(Commit).filter(Commit.project_id == project.id).count()
@@ -594,7 +704,7 @@ def run_collection(
             project.last_collected_at = datetime.now(timezone.utc)
             project.warnings = "; ".join(deduped_warnings) if deduped_warnings else None
             project.status = ProjectStatus.ready
-            _update_project_progress(db, project, "Collection complete", 70)
+            set_progress(project.id, "Collection complete", 70, 100, db_factory=db_factory)
             db.commit()
 
             # Step 7: Run analysis and scoring engine

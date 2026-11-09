@@ -30,6 +30,12 @@ class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     repo_url: str = Field(..., description="GitHub repository URL")
     history_window: Optional[str] = Field("all", description="Commit history window: all, 12m, 6m")
+    history_window_months: Optional[int] = Field(None, description="History window in months: 0 (all), 3, 6, 12, 24")
+
+
+class RecollectProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    history_window_months: Optional[int] = Field(None, description="History window in months: 0 (all), 3, 6, 12, 24")
 
 
 class AssignAliasRequest(BaseModel):
@@ -64,6 +70,63 @@ def check_project_access(
         if is_reviewer_on_project(project.id, user, db):
             return project
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+
+
+@router.get("/estimate")
+def estimate_project(
+    repo_url: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Validates URL, checks user access, and returns size, default branch,
+    approximate commit count, and recommendation ('full' or 'window').
+    """
+    try:
+        owner, repo, canonical_url = validate_and_parse_github_url(repo_url)
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
+
+    client = GitHubClient()
+    auth_res = client.resolve_auth(owner, repo)
+
+    try:
+        meta, _ = client.verify_and_get_metadata(
+            owner=owner,
+            repo=repo,
+            submitting_username=current_user.username,
+            token=auth_res.token
+        )
+    except RepoAccessError as rae:
+        if rae.code == "app_not_installed":
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "code": "app_not_installed",
+                    "message": rae.message,
+                    "install_url": rae.install_url
+                }
+            )
+        raise HTTPException(status_code=rae.status_code, detail=rae.message)
+
+    size_kb = meta.get("size", 0)
+    size_mb = round(size_kb / 1024.0, 2)
+    default_branch = meta.get("default_branch") or "main"
+    is_private = bool(meta.get("private", False))
+
+    approx_commits = client.get_approximate_commit_count(owner, repo, auth_res.token)
+
+    recommendation = "full"
+    if (approx_commits is not None and approx_commits > settings.LARGE_REPO_COMMIT_THRESHOLD) or (size_mb > settings.MAX_REPO_SIZE_MB):
+        recommendation = "window"
+
+    return {
+        "repo_size_mb": size_mb,
+        "default_branch": default_branch,
+        "approximate_commits": approx_commits,
+        "is_private": is_private,
+        "recommendation": recommendation,
+    }
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -126,17 +189,37 @@ def create_project(
         raise HTTPException(status_code=rae.status_code, detail=rae.message)
 
     repo_full_name = f"{owner}/{repo}"
+    approx_commits = client.get_approximate_commit_count(owner, repo, auth_res.token)
+    size_kb = meta.get("size", 0)
+    size_mb = round(size_kb / 1024.0, 2)
+    is_large = (approx_commits is not None and approx_commits > settings.LARGE_REPO_COMMIT_THRESHOLD) or (size_mb > settings.MAX_REPO_SIZE_MB)
 
-    # Calculate history window & since timestamp
-    hist_window = payload.history_window or "all"
-    hist_since = None
+    months = payload.history_window_months
+    if months is None and payload.history_window:
+        if payload.history_window == "12m":
+            months = 12
+        elif payload.history_window == "6m":
+            months = 6
+        elif payload.history_window == "all":
+            months = 0
+
     now_utc = datetime.now(timezone.utc)
-    if hist_window == "12m":
+    partial_analysis = False
+    if months is not None and months > 0:
+        hist_since = now_utc - timedelta(days=months * 30)
+        hist_window = f"{months}m"
+        partial_analysis = True
+    elif is_large:
+        # Auto-window to 12 months for large repository
+        months = 12
         hist_since = now_utc - timedelta(days=365)
-    elif hist_window == "6m":
-        hist_since = now_utc - timedelta(days=180)
+        hist_window = "12m"
+        partial_analysis = True
     else:
+        months = 0
+        hist_since = None
         hist_window = "all"
+        partial_analysis = False
 
     # Check if this owner already added this repo
     existing = db.query(Project).filter(
@@ -155,6 +238,10 @@ def create_project(
         project.error_message = None
         project.history_window = hist_window
         project.history_since = hist_since
+        project.history_window_months = months
+        project.partial_analysis = partial_analysis
+        project.analyzed_since = hist_since
+        project.estimated_commits = approx_commits
     else:
         project = Project(
             owner_id=current_user.id,
@@ -169,6 +256,10 @@ def create_project(
             status=ProjectStatus.pending,
             history_window=hist_window,
             history_since=hist_since,
+            history_window_months=months,
+            partial_analysis=partial_analysis,
+            analyzed_since=hist_since,
+            estimated_commits=approx_commits,
         )
         db.add(project)
 
@@ -253,9 +344,17 @@ def get_project_detail(
         "prs_count": prs_count,
         "history_window": project.history_window,
         "history_since": project.history_since.isoformat() if project.history_since else None,
+        "history_window_months": getattr(project, "history_window_months", None),
         "progress_step": project.progress_step,
         "progress_percent": project.progress_percent,
-        "timing_stats": project.timing_stats,
+        "progress_current": getattr(project, "progress_current", None),
+        "progress_total": getattr(project, "progress_total", None),
+        "clone_mode": getattr(project, "clone_mode", None),
+        "timings": getattr(project, "timings", None) or project.timing_stats,
+        "timing_stats": project.timing_stats or getattr(project, "timings", None),
+        "estimated_commits": getattr(project, "estimated_commits", None),
+        "partial_analysis": getattr(project, "partial_analysis", False),
+        "analyzed_since": project.analyzed_since.isoformat() if getattr(project, "analyzed_since", None) else (project.history_since.isoformat() if project.history_since else None),
     }
 
 
@@ -263,6 +362,7 @@ def get_project_detail(
 def recollect_project(
     id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    payload: Optional[RecollectProjectRequest] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -274,6 +374,22 @@ def recollect_project(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository is already being analyzed."
         )
+
+    if payload and payload.history_window_months is not None:
+        m = payload.history_window_months
+        now_utc = datetime.now(timezone.utc)
+        if m > 0:
+            project.history_window_months = m
+            project.history_since = now_utc - timedelta(days=m * 30)
+            project.analyzed_since = project.history_since
+            project.history_window = f"{m}m"
+            project.partial_analysis = True
+        else:
+            project.history_window_months = 0
+            project.history_since = None
+            project.analyzed_since = None
+            project.history_window = "all"
+            project.partial_analysis = False
 
     project.status = ProjectStatus.pending
     project.error_message = None

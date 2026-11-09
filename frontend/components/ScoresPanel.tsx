@@ -174,14 +174,16 @@ export default function ScoresPanel({
             <p className="text-sm font-semibold text-accent">
               {progressStep || "Computing contribution metrics..."}
             </p>
-            {typeof progressPercent === "number" && (
-              <div className="max-w-[360px] mx-auto w-full bg-border rounded-full h-1.5 overflow-hidden">
+            <div className="max-w-[360px] mx-auto w-full bg-bg border border-border rounded-[4px] h-3 overflow-hidden">
+              {typeof progressPercent === "number" ? (
                 <div
                   className="bg-accent h-full transition-all duration-300"
                   style={{ width: `${Math.min(100, Math.max(5, progressPercent))}%` }}
                 />
-              </div>
-            )}
+              ) : (
+                <div className="bg-accent h-full w-1/3 animate-pulse" />
+              )}
+            </div>
             <p className="text-xs text-text-muted">
               Analyzing survival, effective lines, module ownership and collaboration. This page will update automatically.
             </p>
@@ -309,11 +311,12 @@ export default function ScoresPanel({
                   </thead>
                   <tbody className="divide-y divide-border">
                     {safeMembers.map((m) => {
+                      const isOthers = m.member_id === "others";
                       const isExpanded = expandedMember === m.member_id;
                       const ev = memberEvidences[m.member_id];
                       const isEvLoading = evidenceLoading[m.member_id];
                       const memDetail = members.find((x) => x.id === m.member_id);
-                      const isCurrentUserRow = Boolean(currentUser && memDetail && memDetail.user_id === currentUser.id);
+                      const isCurrentUserRow = Boolean(!isOthers && currentUser && memDetail && memDetail.user_id === currentUser.id);
                       const pInfo = passportData[m.member_id];
                       const pLoading = passportLoading[m.member_id];
                       const pError = passportError[m.member_id];
@@ -324,14 +327,14 @@ export default function ScoresPanel({
                         <React.Fragment key={m.member_id}>
                           <tr className="hover:bg-bg/40 transition-colors duration-120">
                             <td className="py-3 px-4">
-                              {m.display_name && (
-                                <div className="font-medium text-text text-[13px] leading-tight">
-                                  {m.display_name}
+                              <div className="font-medium text-text text-[13px] leading-tight">
+                                {m.display_name || (isOthers ? "Others" : "Member")}
+                              </div>
+                              {!isOthers && (
+                                <div className="font-mono text-[12px] text-text-muted">
+                                  {m.github_login ? `@${m.github_login}` : "Unlinked"}
                                 </div>
                               )}
-                              <div className="font-mono text-[12px] text-text-muted">
-                                {m.github_login ? `@${m.github_login}` : "Unlinked"}
-                              </div>
                             </td>
                             <td className="py-3 px-4 text-right font-mono text-[13px] font-semibold text-text tabular-nums">
                               {Number(m.share_percent || 0).toFixed(2)}%
@@ -345,81 +348,93 @@ export default function ScoresPanel({
                               </div>
                             </td>
                             <td className="py-3 px-4 text-center">
-                              <span className="font-mono text-[11px] border border-border px-2 py-0.5 rounded-[4px] capitalize text-text">
-                                {m.confidence || "unknown"}
-                              </span>
+                              {isOthers ? (
+                                <span className="text-[12px] text-text-muted">—</span>
+                              ) : (
+                                <span className="font-mono text-[11px] border border-border px-2 py-0.5 rounded-[4px] capitalize text-text">
+                                  {m.confidence || "unknown"}
+                                </span>
+                              )}
                             </td>
                             <td className="py-3 px-4">
-                              <div className="flex flex-wrap gap-1">
-                                {memberFlags.length > 0 ? (
-                                  memberFlags.map((fl) => (
-                                    <span
-                                      key={fl}
-                                      className="font-mono text-[11px] border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted"
-                                    >
-                                      {fl}
-                                    </span>
-                                  ))
-                                ) : (
-                                  <span className="text-[12px] text-text-muted">—</span>
-                                )}
-                              </div>
+                              {isOthers ? (
+                                <span className="text-[12px] text-text-muted">—</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {memberFlags.length > 0 ? (
+                                    memberFlags.map((fl) => (
+                                      <span
+                                        key={fl}
+                                        className="font-mono text-[11px] border border-border px-1.5 py-0.5 rounded-[3px] text-text-muted"
+                                      >
+                                        {fl}
+                                      </span>
+                                    ))
+                                  ) : (
+                                    <span className="text-[12px] text-text-muted">—</span>
+                                  )}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleExpandMember(m.member_id)}
-                                  className="btn-secondary text-[12px] h-[28px] px-2.5"
-                                >
-                                  {isExpanded ? "Hide breakdown" : "Why this score?"}
-                                </button>
-                                {isCurrentUserRow && !readOnly && (
-                                  <>
-                                    {pInfo ? (
-                                      <>
-                                        <a
-                                          href={`/p/${pInfo.code}`}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="btn-secondary text-[12px] h-[28px] px-2.5 inline-flex items-center text-accent"
-                                        >
-                                          View passport
-                                        </a>
+                              {isOthers ? (
+                                <span className="text-[12px] text-text-muted">—</span>
+                              ) : (
+                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleExpandMember(m.member_id)}
+                                    className="btn-secondary text-[12px] h-[28px] px-2.5"
+                                  >
+                                    {isExpanded ? "Hide breakdown" : "Why this score?"}
+                                  </button>
+                                  {isCurrentUserRow && !readOnly && (
+                                    <>
+                                      {pInfo ? (
+                                        <>
+                                          <a
+                                            href={`/p/${pInfo.code}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="btn-secondary text-[12px] h-[28px] px-2.5 inline-flex items-center text-accent"
+                                          >
+                                            View passport
+                                          </a>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleCopyPassport(m.member_id, pInfo.code)}
+                                            className="btn-secondary text-[12px] h-[28px] px-2.5"
+                                          >
+                                            {pCopied ? "Copied" : "Copy link"}
+                                          </button>
+                                        </>
+                                      ) : (
                                         <button
                                           type="button"
-                                          onClick={() => handleCopyPassport(m.member_id, pInfo.code)}
-                                          className="btn-secondary text-[12px] h-[28px] px-2.5"
+                                          onClick={() => handlePublish(m.member_id)}
+                                          disabled={pLoading}
+                                          className="btn-primary text-[12px] h-[28px] px-2.5"
                                         >
-                                          {pCopied ? "Copied" : "Copy link"}
+                                          {pLoading ? "Publishing..." : "Publish passport"}
                                         </button>
-                                      </>
-                                    ) : (
+                                      )}
                                       <button
                                         type="button"
-                                        onClick={() => handlePublish(m.member_id)}
-                                        disabled={pLoading}
-                                        className="btn-primary text-[12px] h-[28px] px-2.5"
+                                        onClick={() => {
+                                          setDisputingMemberId(disputingMemberId === m.member_id ? null : m.member_id);
+                                          setDisputeError(null);
+                                          setDisputeSuccess(null);
+                                        }}
+                                        className="btn-secondary text-[12px] h-[28px] px-2.5"
                                       >
-                                        {pLoading ? "Publishing..." : "Publish passport"}
+                                        {disputingMemberId === m.member_id ? "Cancel dispute" : "Dispute this score"}
                                       </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setDisputingMemberId(disputingMemberId === m.member_id ? null : m.member_id);
-                                        setDisputeError(null);
-                                        setDisputeSuccess(null);
-                                      }}
-                                      className="btn-secondary text-[12px] h-[28px] px-2.5"
-                                    >
-                                      {disputingMemberId === m.member_id ? "Cancel dispute" : "Dispute this score"}
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                              {pError && (
-                                <div className="text-[11px] text-danger mt-1 text-right">{pError}</div>
+                                    </>
+                                  )}
+                                  {pError && (
+                                    <div className="text-[11px] text-danger mt-1 text-right">{pError}</div>
+                                  )}
+                                </div>
                               )}
                             </td>
                           </tr>

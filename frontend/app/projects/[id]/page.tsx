@@ -55,6 +55,8 @@ export default function ProjectDetailPage() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [progressStep, setProgressStep] = useState<string | null>(null);
   const [progressPercent, setProgressPercent] = useState<number | null>(null);
+  const [progressCurrent, setProgressCurrent] = useState<number | null>(null);
+  const [progressTotal, setProgressTotal] = useState<number | null>(null);
 
   // Passport state
   const [passportData, setPassportData] = useState<Record<string, { code: string; url: string }>>({});
@@ -103,6 +105,8 @@ export default function ProjectDetailPage() {
     setProject(proj);
     if (proj.progress_step !== undefined) setProgressStep(proj.progress_step);
     if (proj.progress_percent !== undefined) setProgressPercent(proj.progress_percent);
+    if (proj.progress_current !== undefined) setProgressCurrent(proj.progress_current);
+    if (proj.progress_total !== undefined) setProgressTotal(proj.progress_total);
 
     if (proj.status === "ready") {
       const [mems, aliases, cms, statusRes, scoreRes, dispList, myPassports, revList, sums, orig] = await Promise.all([
@@ -139,6 +143,8 @@ export default function ProjectDetailPage() {
         setAnalysisError(statusRes.analysis_error);
         if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
         if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
+        if (statusRes.progress_current !== undefined) setProgressCurrent(statusRes.progress_current);
+        if (statusRes.progress_total !== undefined) setProgressTotal(statusRes.progress_total);
       }
       if (scoreRes) {
         setScores(scoreRes);
@@ -171,6 +177,8 @@ export default function ProjectDetailPage() {
           setProject(updated);
           if (updated.progress_step !== undefined) setProgressStep(updated.progress_step);
           if (updated.progress_percent !== undefined) setProgressPercent(updated.progress_percent);
+          if (updated.progress_current !== undefined) setProgressCurrent(updated.progress_current);
+          if (updated.progress_total !== undefined) setProgressTotal(updated.progress_total);
           if (updated.status === "ready") {
             const [mems, aliases, cms, statusRes, scoreRes] = await Promise.all([
               getProjectMembers(id),
@@ -187,6 +195,8 @@ export default function ProjectDetailPage() {
               setAnalysisError(statusRes.analysis_error);
               if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
               if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
+              if (statusRes.progress_current !== undefined) setProgressCurrent(statusRes.progress_current);
+              if (statusRes.progress_total !== undefined) setProgressTotal(statusRes.progress_total);
             }
             if (scoreRes) {
               setScores(scoreRes);
@@ -200,6 +210,8 @@ export default function ProjectDetailPage() {
           setAnalysisError(statusRes.analysis_error);
           if (statusRes.progress_step !== undefined) setProgressStep(statusRes.progress_step);
           if (statusRes.progress_percent !== undefined) setProgressPercent(statusRes.progress_percent);
+          if (statusRes.progress_current !== undefined) setProgressCurrent(statusRes.progress_current);
+          if (statusRes.progress_total !== undefined) setProgressTotal(statusRes.progress_total);
           if (statusRes.analysis_status === "complete") {
             const scoreRes = await getProjectScores(id);
             if (scoreRes) {
@@ -208,7 +220,7 @@ export default function ProjectDetailPage() {
           }
         }
       }
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(interval);
   }, [id, project, analysisStatus]);
@@ -326,6 +338,13 @@ export default function ProjectDetailPage() {
           actionLoading={actionLoading}
           confirmDelete={confirmDelete}
           onRecollect={handleRecollect}
+          onRecollectWithWindow={async (months: number) => {
+            if (actionLoading) return;
+            setActionLoading(true);
+            await recollectProject(id, months);
+            await loadData();
+            setActionLoading(false);
+          }}
           onDelete={handleDelete}
         />
 
@@ -333,16 +352,21 @@ export default function ProjectDetailPage() {
         {(project.status === "pending" || project.status === "analyzing") && (
           <div className="bg-surface border border-border rounded-[6px] p-8 text-center space-y-3">
             <p className="text-text font-medium text-[15px]">
-              {progressStep || "Collecting repository history..."}
+              {progressStep || "Collecting repository history..."}{" "}
+              {typeof progressTotal === "number" && progressTotal > 0
+                ? `(${progressCurrent?.toLocaleString() ?? 0} / ${progressTotal.toLocaleString()})`
+                : ""}
             </p>
-            {typeof progressPercent === "number" && (
-              <div className="max-w-[360px] mx-auto w-full bg-border rounded-full h-1.5 overflow-hidden">
+            <div className="max-w-[360px] mx-auto w-full bg-bg border border-border rounded-[4px] h-3 overflow-hidden">
+              {typeof progressPercent === "number" ? (
                 <div
                   className="bg-accent h-full transition-all duration-300"
                   style={{ width: `${Math.min(100, Math.max(5, progressPercent))}%` }}
                 />
-              </div>
-            )}
+              ) : (
+                <div className="bg-accent h-full w-1/3 animate-pulse" />
+              )}
+            </div>
             <p className="text-text-muted text-[13px]">
               Cloning repository history and mapping author identities. This page will update automatically.
             </p>

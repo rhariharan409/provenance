@@ -35,9 +35,17 @@ export interface ProjectDetail extends ProjectSummary {
   prs_count: number;
   history_window?: string | null;
   history_since?: string | null;
+  history_window_months?: number | null;
   progress_step?: string | null;
   progress_percent?: number | null;
+  progress_current?: number | null;
+  progress_total?: number | null;
+  clone_mode?: string | null;
+  timings?: Record<string, number> | null;
   timing_stats?: Record<string, unknown> | null;
+  estimated_commits?: number | null;
+  partial_analysis?: boolean;
+  analyzed_since?: string | null;
 }
 
 export interface MemberAlias {
@@ -109,6 +117,10 @@ export interface ProjectScoresResponse {
   history_window?: string | null;
   history_since?: string | null;
   timing_stats?: Record<string, unknown> | null;
+  timings?: Record<string, number> | null;
+  clone_mode?: string | null;
+  partial_analysis?: boolean;
+  analyzed_since?: string | null;
 }
 
 export interface MemberEvidenceResponse {
@@ -129,6 +141,20 @@ export interface AnalysisStatusResponse {
   analysis_error: string | null;
   progress_step?: string | null;
   progress_percent?: number | null;
+  progress_current?: number | null;
+  progress_total?: number | null;
+  timings?: Record<string, number> | null;
+  clone_mode?: string | null;
+  partial_analysis?: boolean;
+  analyzed_since?: string | null;
+}
+
+export interface RepoEstimate {
+  repo_size_mb: number;
+  default_branch: string;
+  approximate_commits: number | null;
+  is_private: boolean;
+  recommendation: "full" | "window";
 }
 
 /**
@@ -260,10 +286,28 @@ export async function getProjectDetail(
 }
 
 /**
+ * Estimates repository size and commit count before creating a project.
+ */
+export async function estimateProject(repo_url: string): Promise<RepoEstimate | null> {
+  try {
+    const params = new URLSearchParams({ repo_url });
+    const response = await fetch(`/api/projects/estimate?${params.toString()}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Submits a new project repository URL.
  */
 export async function createProject(
   repo_url: string,
+  history_window_months?: number | null,
   history_window?: string
 ): Promise<{
   ok: boolean;
@@ -274,8 +318,11 @@ export async function createProject(
   install_url?: string;
 }> {
   try {
-    const payload: { repo_url: string; history_window?: string } = { repo_url };
-    if (history_window && history_window !== "all") {
+    const payload: { repo_url: string; history_window?: string; history_window_months?: number | null } = { repo_url };
+    if (history_window_months !== undefined && history_window_months !== null) {
+      payload.history_window_months = history_window_months;
+      payload.history_window = history_window_months > 0 ? `${history_window_months}m` : "all";
+    } else if (history_window && history_window !== "all") {
       payload.history_window = history_window;
     }
     const response = await fetch("/api/projects", {
@@ -316,11 +363,21 @@ export async function createProject(
 /**
  * Triggers re-collection for a project.
  */
-export async function recollectProject(id: string): Promise<boolean> {
+export async function recollectProject(
+  id: string,
+  history_window_months?: number | null
+): Promise<boolean> {
   try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    let body: string | undefined = undefined;
+    if (history_window_months !== undefined && history_window_months !== null) {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify({ history_window_months });
+    }
     const response = await fetch(`/api/projects/${id}/recollect`, {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers,
+      body,
     });
     return response.ok;
   } catch {

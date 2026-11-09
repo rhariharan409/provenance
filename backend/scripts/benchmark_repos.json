@@ -1,0 +1,31 @@
+[
+  {
+    "category": "micro",
+    "name": "octocat/Hello-World",
+    "url": "https://github.com/octocat/Hello-World",
+    "expected_commits": "< 100",
+    "description": "Micro repository for basic clone, collection, and attribution testing"
+  },
+  {
+    "category": "medium",
+    "name": "encode/starlette",
+    "url": "https://github.com/encode/starlette",
+    "expected_commits": "~2,000",
+    "description": "Medium ASGI framework repository with moderate commit history and active contributors"
+  },
+  {
+    "category": "large",
+    "name": "pallets/flask",
+    "url": "https://github.com/pallets/flask",
+    "expected_commits": "5,000+",
+    "description": "Popular WSGI web application framework repository with deep git history"
+  },
+  {
+    "category": "very_large",
+    "name": "tiangolo/fastapi",
+    "url": "https://github.com/tiangolo/fastapi",
+    "expected_commits": "20,000+",
+    "description": "Large high-performance API framework repository suitable for history window testing"
+  }
+]
+

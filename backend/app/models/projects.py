@@ -72,6 +72,14 @@ class Project(Base):
     progress_step: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     progress_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     timing_stats: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    history_window_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    progress_current: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    progress_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    clone_mode: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    timings: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    estimated_commits: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    partial_analysis: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    analyzed_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner = relationship("User", backref="projects")
 

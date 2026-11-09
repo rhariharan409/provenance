@@ -82,6 +82,26 @@ GENERATED_MARKERS = [
     ".designer.cs",
 ]
 
+DOC_DATA_EXTENSIONS = {
+    ".md", ".txt", ".rst", ".csv", ".tsv", ".json", ".yaml", ".yml",
+}
+
+MIGRATION_FOLDERS = {
+    "migrations", "migration", "alembic",
+}
+
+FIXTURE_FOLDERS = {
+    "fixtures", "fixture",
+}
+
+TEST_DATA_FOLDERS = {
+    "test_data", "testdata", "test-data",
+}
+
+PROTOBUF_EXTENSIONS = (
+    "_pb2.py", "_pb2_grpc.py", ".pb.go", ".pb.cc", ".pb.h", "_pb.js", "_pb.d.ts",
+)
+
 
 def is_ignored(
     path: str,
@@ -177,18 +197,45 @@ def is_ignored(
 
     # 5. Directory check
     for part in parts[:-1]:
-        if part.lower() in IGNORED_DIRECTORIES:
+        p_l = part.lower()
+        if p_l in IGNORED_DIRECTORIES:
             return True, f"ignored_directory: {part}"
+        if p_l in MIGRATION_FOLDERS:
+            return True, "migrations"
+        if p_l in FIXTURE_FOLDERS:
+            return True, "fixtures"
+        if p_l in TEST_DATA_FOLDERS:
+            return True, "test_data"
+        if p_l == "__snapshots__":
+            return True, "snapshots"
 
-    # 6. Lockfile check
+    # 6. Lockfile and snapshots filename check
     if filename in LOCKFILES or filename.endswith(".lock"):
         return True, f"lockfile: {filename}"
+    if filename.endswith(".snap") or filename.endswith(".snapshot"):
+        return True, "snapshots"
 
-    # 7. Minified check (*.min.js, *.min.css)
-    if filename.endswith(".min.js") or filename.endswith(".min.css"):
+    # 7. Documentation and data larger than 50 KB
+    if ext in DOC_DATA_EXTENSIONS and size_bytes is not None and size_bytes > 50 * 1024:
+        return True, "documentation_or_data"
+
+    # 8. Protobuf and generated code
+    if any(filename.endswith(pe) for pe in PROTOBUF_EXTENSIONS):
+        return True, "protobuf_output"
+    if ".generated." in filename:
+        return True, "generated_code"
+
+    # 9. Bundled or minified check (*.min.js, *.min.css, *.bundle.js, *.chunk.js)
+    if (
+        filename.endswith(".min.js")
+        or filename.endswith(".min.css")
+        or filename.endswith(".bundle.js")
+        or filename == "bundle.js"
+        or filename.endswith(".chunk.js")
+    ):
         return True, f"minified: {filename}"
 
-    # 8. Source map check (*.map)
+    # 10. Source map check (*.map)
     if filename.endswith(".map"):
         return True, f"source_map: {filename}"
 

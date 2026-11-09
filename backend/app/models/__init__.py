@@ -14,6 +14,7 @@ from app.models.faculty import ProjectFaculty
 from app.models.summaries import MemberSummary, SummaryMethod
 from app.models.originality import Fingerprint, OriginalityMatch
 from app.models.review_invitations import ReviewInvitation, InvitationStatus
+from app.models.blame_cache import BlameCache
 
 __all__ = [
     "Base",
@@ -42,4 +43,5 @@ __all__ = [
     "OriginalityMatch",
     "ReviewInvitation",
     "InvitationStatus",
+    "BlameCache",
 ]

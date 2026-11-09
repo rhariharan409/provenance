@@ -1,3 +1,4 @@
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -8,12 +9,14 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import uuid
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
 from app.models.analysis_runs import AnalysisRun, AnalysisRunStatus
 from app.models.author_aliases import AuthorAlias
+from app.models.blame_cache import BlameCache
 from app.models.commits import Commit
 from app.models.contributions import Contribution
 from app.models.contribution_scores import ContributionScore, ScoreConfidence
@@ -32,7 +35,14 @@ from app.services.analysis.flags import (
 )
 from app.services.analysis.ownership import compute_module_ownership
 from app.services.analysis.scoring import calculate_final_scores
-from app.services.analysis.survival import ProjectSurvivalResults, get_top_level_module, process_file_blame
+from app.services.analysis.survival import (
+    ProjectSurvivalResults,
+    apply_blame_result_to_survival,
+    extract_file_blame_result,
+    get_top_level_module,
+    process_file_blame,
+)
+from app.services.progress import record_step_timing, set_progress
 
 logger = logging.getLogger(__name__)
 
@@ -309,15 +319,40 @@ def run_analysis(
 
             is_truncated = False
             project_flags: List[str] = []
+            files_candidates = len(candidates)
+            files_skipped_by_cap = 0
+            is_partial = bool(project.partial_analysis or project.history_since or getattr(project, "history_window_months", None))
 
-            if len(candidates) > settings.MAX_BLAME_FILES:
+            if files_candidates > settings.MAX_BLAME_FILES:
                 is_truncated = True
-                project_flags.append("truncated")
-                # Sort by size descending and cap
-                candidates.sort(key=lambda x: x[1], reverse=True)
+                is_partial = True
+                if "partial_file_coverage" not in project_flags:
+                    project_flags.append("partial_file_coverage")
+                try:
+                    rank_cmd = ["git", "--git-dir", clone_path, "log", "--name-only", "--format=", head_sha]
+                    if project.history_since:
+                        rank_cmd.append(f"--since={project.history_since.isoformat()}")
+                    rank_proc = subprocess.run(
+                        rank_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        shell=False,
+                        timeout=60,
+                    )
+                    file_counts = Counter(line.strip() for line in rank_proc.stdout.splitlines() if line.strip())
+                except Exception:
+                    file_counts = Counter()
+
+                candidates.sort(key=lambda x: (file_counts.get(x[0], 0), x[1]), reverse=True)
+                files_skipped_by_cap = files_candidates - settings.MAX_BLAME_FILES
                 candidates = candidates[:settings.MAX_BLAME_FILES]
 
-            files_analyzed = len(candidates)
+            files_blamed = len(candidates)
+            files_analyzed = files_blamed
+            if project.history_since and "window_applied" not in project_flags:
+                project_flags.append("window_applied")
 
             # 2. Build alias mapping: (email, name) -> member_id
             aliases = db.query(AuthorAlias).filter(AuthorAlias.project_id == project.id).all()
@@ -346,95 +381,64 @@ def run_analysis(
             member_id_to_member = {str(m.id): m for m in members}
             member_logins = {str(m.id): m.github_login for m in members}
 
-            # 3. Blame and survival processing (with incremental diff and parallel blame pool)
+            # 3. Blame and survival processing (with BlameCache and bounded parallel pool)
             t_blame_start = time.time()
             survival_results = ProjectSurvivalResults()
             per_file_timeout = 25
             current_file_survival: Dict[str, Any] = {}
+
+            # Query database blame cache for this project
+            cached_rows = (
+                db.query(BlameCache)
+                .filter(BlameCache.project_id == project.id)
+                .all()
+            )
+            cached_map = {(r.blob_sha, r.path): r.result for r in cached_rows}
+
+            cache_hits = 0
+            cache_misses = 0
             files_to_blame: List[Tuple[str, int, str]] = []
 
-            # Check for previous completed analysis run for incremental re-blame
-            prev_run = (
-                db.query(AnalysisRun)
-                .filter(
-                    AnalysisRun.project_id == project.id,
-                    AnalysisRun.status == AnalysisRunStatus.complete,
-                    AnalysisRun.id != run_id,
-                )
-                .order_by(AnalysisRun.started_at.desc())
-                .first()
-            )
-
-            if (
-                prev_run
-                and prev_run.head_sha
-                and isinstance(prev_run.stats, dict)
-                and "file_survival" in prev_run.stats
-                and isinstance(prev_run.stats["file_survival"], dict)
-            ):
-                prev_survival = prev_run.stats["file_survival"]
-                if prev_run.head_sha == head_sha:
-                    changed_files = set()
+            for item in candidates:
+                f_path, size_bytes, b_sha = item
+                if b_sha and (b_sha, f_path) in cached_map:
+                    cache_hits += 1
+                    author_counts = cached_map[(b_sha, f_path)]
+                    apply_blame_result_to_survival(f_path, author_counts, lookup_member, survival_results)
+                    current_file_survival[f_path] = {
+                        "meaningful_lines": sum(author_counts.values()),
+                        "module": get_top_level_module(f_path),
+                        "member_lines": {lookup_member(em, ""): cnt for em, cnt in author_counts.items() if lookup_member(em, "")}
+                    }
                 else:
-                    diff_cmd = ["git", "--git-dir", clone_path, "diff", "--name-only", prev_run.head_sha, head_sha]
-                    diff_proc = subprocess.run(
-                        diff_cmd,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        shell=False,
-                        timeout=30,
-                    )
-                    if diff_proc.returncode == 0:
-                        changed_files = set(line.strip() for line in diff_proc.stdout.splitlines() if line.strip())
-                    else:
-                        changed_files = None
+                    cache_misses += 1
+                    files_to_blame.append(item)
 
-                if changed_files is not None:
-                    for file_path, size_bytes, blob_sha in candidates:
-                        if file_path not in changed_files and file_path in prev_survival:
-                            _apply_cached_file_survival(file_path, prev_survival[file_path], survival_results)
-                            current_file_survival[file_path] = prev_survival[file_path]
-                        else:
-                            files_to_blame.append((file_path, size_bytes, blob_sha))
-                else:
-                    files_to_blame = list(candidates)
-            else:
-                files_to_blame = list(candidates)
-
-            # In-memory blame cache keyed by (blob_sha, path)
-            blame_cache: Dict[Tuple[str, str], str] = {}
-            blame_cache_lock = threading.Lock()
             total_to_blame = len(files_to_blame)
             blamed_done = 0
             max_workers = max(1, settings.ANALYSIS_WORKERS)
+            new_cache_rows: List[BlameCache] = []
 
             if total_to_blame > 0:
-                _update_analysis_progress(
-                    db,
-                    project,
+                set_progress(
+                    project.id,
                     f"Blaming files 0 of {total_to_blame}",
-                    70,
+                    0,
+                    total_to_blame,
+                    db_factory=db_factory,
                 )
 
-                def _blame_worker(item: Tuple[str, int, str]) -> Tuple[str, Optional[str]]:
-                    f_path, _, b_sha = item
-                    cache_key = (b_sha, f_path)
-                    if b_sha:
-                        with blame_cache_lock:
-                            if cache_key in blame_cache:
-                                return f_path, blame_cache[cache_key]
-
+                def _blame_worker(item: Tuple[str, int, str]) -> Tuple[str, str, Optional[str]]:
+                    f_path, sz, b_sha = item
+                    # -w -M -C only when file is under 2000 lines (approximated by size < 80000 bytes)
+                    blame_flags = ["-w", "-M", "-C"] if sz < 80000 else ["-w"]
                     cmd = [
                         "git",
                         "--git-dir",
                         clone_path,
                         "blame",
                         "--line-porcelain",
-                        "-w",
-                        "-M",
-                        "-C",
+                    ] + blame_flags + [
                         head_sha,
                         "--",
                         f_path,
@@ -450,14 +454,10 @@ def run_analysis(
                             timeout=per_file_timeout,
                         )
                         if p.returncode == 0:
-                            out = p.stdout
-                            if b_sha:
-                                with blame_cache_lock:
-                                    blame_cache[cache_key] = out
-                            return f_path, out
+                            return f_path, b_sha, p.stdout
                     except Exception as ex:
                         logger.debug("Blame failed for %s: %s", f_path, ex)
-                    return f_path, None
+                    return f_path, b_sha, None
 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {executor.submit(_blame_worker, item): item[0] for item in files_to_blame}
@@ -471,27 +471,67 @@ def run_analysis(
                                 f.cancel()
                             break
 
-                        f_path, blame_out = future.result()
+                        f_path, b_sha, blame_out = future.result()
                         blamed_done += 1
                         if blame_out:
-                            file_record = _process_and_record_blame(
-                                file_path=f_path,
-                                blame_output=blame_out,
-                                alias_lookup_fn=lookup_member,
-                                results=survival_results,
-                            )
-                            current_file_survival[f_path] = file_record
+                            # Bound memory: process and discard blame_out immediately
+                            email_counts = extract_file_blame_result(f_path, blame_out)
+                            blame_out = None
+                            apply_blame_result_to_survival(f_path, email_counts, lookup_member, survival_results)
+                            current_file_survival[f_path] = {
+                                "meaningful_lines": sum(email_counts.values()),
+                                "module": get_top_level_module(f_path),
+                                "member_lines": {lookup_member(em, ""): cnt for em, cnt in email_counts.items() if lookup_member(em, "")}
+                            }
+                            if b_sha:
+                                new_cache_rows.append(BlameCache(
+                                    project_id=project.id,
+                                    blob_sha=b_sha,
+                                    path=f_path,
+                                    result=email_counts,
+                                ))
 
-                        if blamed_done % 5 == 0 or blamed_done == total_to_blame:
-                            pct = 70 + int((blamed_done / max(1, total_to_blame)) * 15)
-                            _update_analysis_progress(
-                                db,
-                                project,
-                                f"Blaming files {blamed_done} of {total_to_blame}",
-                                pct,
+                        set_progress(
+                            project.id,
+                            f"Blaming files {blamed_done} of {total_to_blame}",
+                            blamed_done,
+                            total_to_blame,
+                            db_factory=db_factory,
+                        )
+
+                # Persist newly blamed files to BlameCache in batch
+                if new_cache_rows:
+                    try:
+                        for row in new_cache_rows:
+                            existing = db.query(BlameCache).filter(
+                                BlameCache.project_id == project.id,
+                                BlameCache.blob_sha == row.blob_sha,
+                                BlameCache.path == row.path,
+                            ).first()
+                            if not existing:
+                                db.add(row)
+                        db.commit()
+
+                        # Prune oldest rows beyond BLAME_CACHE_MAX_ENTRIES per project
+                        total_cached = db.query(func.count(BlameCache.id)).filter(BlameCache.project_id == project.id).scalar() or 0
+                        if total_cached > settings.BLAME_CACHE_MAX_ENTRIES:
+                            excess = total_cached - settings.BLAME_CACHE_MAX_ENTRIES
+                            oldest = (
+                                db.query(BlameCache.id)
+                                .filter(BlameCache.project_id == project.id)
+                                .order_by(BlameCache.created_at.asc())
+                                .limit(excess)
+                                .all()
                             )
+                            if oldest:
+                                db.query(BlameCache).filter(BlameCache.id.in_([r[0] for r in oldest])).delete(synchronize_session=False)
+                                db.commit()
+                    except Exception as ex:
+                        db.rollback()
+                        logger.debug("Non-fatal blame cache persistence error: %s", ex)
 
             analysis_timings["git_blame"] = round(time.time() - t_blame_start, 3)
+            record_step_timing(project.id, "blame", analysis_timings["git_blame"], db_factory=db_factory)
 
             # 4. Effective change over stored commits
             _update_analysis_progress(db, project, "Computing effective change...", 86)
@@ -668,6 +708,9 @@ def run_analysis(
                     total_project_counted_commits=commits_counted,
                 )
 
+                if is_partial and conf_str == "high":
+                    conf_str = "medium"
+
                 # Member flags
                 m_flags: List[str] = []
                 if check_late_dump(m_dates):
@@ -736,6 +779,13 @@ def run_analysis(
 
             run_stats = {
                 "files_total": files_total,
+                "files_candidates": files_candidates,
+                "files_blamed": files_blamed,
+                "files_skipped_by_cap": files_skipped_by_cap,
+                "cache_hits": cache_hits,
+                "cache_misses": cache_misses,
+                "partial": is_partial,
+                "window_since": project.history_since.isoformat() if project.history_since else None,
                 "files_analyzed": files_analyzed,
                 "files_ignored": files_ignored,
                 "ignored_reasons": ignored_reasons,
@@ -758,11 +808,19 @@ def run_analysis(
             p_timings = dict(project.timing_stats or {})
             p_timings["analysis"] = analysis_timings
             project.timing_stats = p_timings
+            project.timings = p_timings
+            project.partial_analysis = is_partial
+            if project.history_since:
+                project.analyzed_since = project.history_since
             project.analysis_status = "complete"
             project.analysis_error = None
             project.progress_step = "Analysis complete"
             project.progress_percent = 100
             db.commit()
+
+            record_step_timing(project.id, "scoring", analysis_timings["scoring"], db_factory=db_factory)
+            record_step_timing(project.id, "total", total_elapsed, db_factory=db_factory)
+            set_progress(project.id, "Analysis complete", 100, 100, db_factory=db_factory)
 
             for step_name, sec in analysis_timings.items():
                 logger.info("Timing [Analysis] %s: %.3fs", step_name, sec)

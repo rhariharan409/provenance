@@ -94,6 +94,8 @@ def build_snapshot(
     members_with_active_passports: Optional[Set[str]] = None,
     scoring_version: str = "1.0",
     weights: Optional[Dict[str, float]] = None,
+    history_since: Optional[datetime] = None,
+    project_flags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Builds the immutable frozen snapshot for a contribution passport.
@@ -188,6 +190,10 @@ def build_snapshot(
             "not a measure of total effort. Work outside the repository is not captured."
         ),
     }
+    if history_since:
+        notes_dict["window_note"] = f"Analyzed commits since {history_since.strftime('%Y-%m-%d')}."
+    if project_flags and "partial_file_coverage" in project_flags:
+        notes_dict["coverage_note"] = "Large repository: the most-changed source files were analyzed."
 
     snapshot = {
         "project": project_dict,

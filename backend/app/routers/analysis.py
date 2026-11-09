@@ -44,6 +44,12 @@ class AnalysisStatusResponse(BaseModel):
     analysis_error: Optional[str] = None
     progress_step: Optional[str] = None
     progress_percent: Optional[int] = None
+    progress_current: Optional[int] = None
+    progress_total: Optional[int] = None
+    timings: Optional[Dict[str, Any]] = None
+    clone_mode: Optional[str] = None
+    partial_analysis: Optional[bool] = False
+    analyzed_since: Optional[str] = None
 
 
 class MemberScoreItem(BaseModel):
@@ -69,6 +75,10 @@ class ProjectScoresResponse(BaseModel):
     history_window: Optional[str] = None
     history_since: Optional[str] = None
     timing_stats: Optional[Dict[str, Any]] = None
+    timings: Optional[Dict[str, Any]] = None
+    clone_mode: Optional[str] = None
+    partial_analysis: Optional[bool] = False
+    analyzed_since: Optional[str] = None
 
 
 class MemberEvidenceResponse(BaseModel):
@@ -125,6 +135,12 @@ def get_analysis_status(
         analysis_error=project.analysis_error,
         progress_step=project.progress_step,
         progress_percent=project.progress_percent,
+        progress_current=getattr(project, "progress_current", None),
+        progress_total=getattr(project, "progress_total", None),
+        timings=getattr(project, "timings", None) or project.timing_stats,
+        clone_mode=getattr(project, "clone_mode", None),
+        partial_analysis=getattr(project, "partial_analysis", False),
+        analyzed_since=project.analyzed_since.isoformat() if getattr(project, "analyzed_since", None) else (project.history_since.isoformat() if project.history_since else None),
     )
 
 
@@ -163,20 +179,57 @@ def get_project_scores(
     # Sort score rows by share_percent descending
     score_rows.sort(key=lambda x: x.share_percent, reverse=True)
 
+    max_shown = settings.MAX_CONTRIBUTORS_SHOWN
     member_items: List[MemberScoreItem] = []
-    for s in score_rows:
-        m = members_map.get(s.member_id)
+
+    if len(score_rows) > max_shown:
+        top_rows = score_rows[:max_shown]
+        tail_rows = score_rows[max_shown:]
+        tail_count = len(tail_rows)
+        top_shares_sum = 0.0
+
+        for s in top_rows:
+            m = members_map.get(s.member_id)
+            share_val = float(s.share_percent)
+            top_shares_sum += share_val
+            member_items.append(
+                MemberScoreItem(
+                    member_id=str(s.member_id),
+                    display_name=m.display_name if m else None,
+                    github_login=m.github_login if m else None,
+                    share_percent=share_val,
+                    confidence=s.confidence.value,
+                    flags=s.flags or [],
+                    signals=s.signals or {},
+                )
+            )
+
+        others_share = round(max(0.0, 100.00 - top_shares_sum), 2)
         member_items.append(
             MemberScoreItem(
-                member_id=str(s.member_id),
-                display_name=m.display_name if m else None,
-                github_login=m.github_login if m else None,
-                share_percent=float(s.share_percent),
-                confidence=s.confidence.value,
-                flags=s.flags or [],
-                signals=s.signals or {},
+                member_id="others",
+                display_name=f"Others ({tail_count} contributors)",
+                github_login=None,
+                share_percent=others_share,
+                confidence="medium",
+                flags=[],
+                signals={},
             )
         )
+    else:
+        for s in score_rows:
+            m = members_map.get(s.member_id)
+            member_items.append(
+                MemberScoreItem(
+                    member_id=str(s.member_id),
+                    display_name=m.display_name if m else None,
+                    github_login=m.github_login if m else None,
+                    share_percent=float(s.share_percent),
+                    confidence=s.confidence.value,
+                    flags=s.flags or [],
+                    signals=s.signals or {},
+                )
+            )
 
     stats = latest_run.stats or {}
     raw_p_flags = stats.get("project_flags", [])
@@ -199,6 +252,10 @@ def get_project_scores(
         history_window=project.history_window,
         history_since=project.history_since.isoformat() if project.history_since else None,
         timing_stats=project.timing_stats,
+        timings=getattr(project, "timings", None) or project.timing_stats,
+        clone_mode=getattr(project, "clone_mode", None),
+        partial_analysis=getattr(project, "partial_analysis", False),
+        analyzed_since=project.analyzed_since.isoformat() if getattr(project, "analyzed_since", None) else (project.history_since.isoformat() if project.history_since else None),
     )
 
 

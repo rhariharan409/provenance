@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -19,7 +19,7 @@ from app.models.members import Member
 from app.models.projects import Project, ProjectStatus
 from app.models.pull_requests import PullRequest, Review
 from app.models.users import User, UserRole
-from app.services.collector import run_collection, validate_and_parse_github_url
+from app.services.collector import run_collection, normalize_repo_url, validate_and_parse_github_url
 from app.services.github_client import GitHubClient, RepoAccessError
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -83,7 +83,7 @@ def estimate_project(
     approximate commit count, and recommendation ('full' or 'window').
     """
     try:
-        owner, repo, canonical_url = validate_and_parse_github_url(repo_url)
+        owner, repo, canonical_url = normalize_repo_url(repo_url)
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
 
@@ -140,7 +140,7 @@ def create_project(
     Validates URL, checks user limits and access, creates project, and triggers collection.
     """
     try:
-        owner, repo, canonical_url = validate_and_parse_github_url(payload.repo_url)
+        owner, repo, canonical_url = normalize_repo_url(payload.repo_url)
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
 
@@ -221,10 +221,16 @@ def create_project(
         hist_window = "all"
         partial_analysis = False
 
-    # Check if this owner already added this repo
+    # Check if this owner already added this repo (case-insensitive on owner/repo, with or without .git)
+    norm_owner_repo = f"{owner}/{repo}".lower()
     existing = db.query(Project).filter(
         Project.owner_id == current_user.id,
-        func.lower(Project.repo_full_name) == repo_full_name.lower()
+        or_(
+            func.lower(Project.repo_full_name) == norm_owner_repo,
+            func.lower(Project.repo_full_name) == f"{norm_owner_repo}.git",
+            func.lower(Project.repo_url) == canonical_url.lower(),
+            func.lower(Project.repo_url) == f"{canonical_url.lower()}.git",
+        )
     ).first()
 
     if existing:
@@ -234,6 +240,11 @@ def create_project(
                 detail="Repository is already being analyzed."
             )
         project = existing
+        project.repo_full_name = repo_full_name
+        project.repo_url = canonical_url
+        project.github_owner = owner
+        project.github_repo = repo
+        project.name = repo
         project.status = ProjectStatus.pending
         project.error_message = None
         project.history_window = hist_window

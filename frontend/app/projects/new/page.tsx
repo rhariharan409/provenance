@@ -5,6 +5,42 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createProject, estimateProject, RepoEstimate } from "@/lib/api";
 
+function parseCleanOwnerRepo(input: string): { owner: string; repo: string; cleaned: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("@") || trimmed.toLowerCase().startsWith("file:")) return null;
+
+  let rest = trimmed;
+  if (rest.includes("://")) {
+    const [scheme, remainder] = rest.split("://");
+    if (!["http", "https"].includes(scheme.toLowerCase())) return null;
+    rest = remainder;
+  }
+  rest = rest.split("#")[0].split("?")[0];
+  const parts = rest.split("/");
+  const host = parts[0].toLowerCase();
+  if (host !== "github.com" && host !== "www.github.com") return null;
+
+  const segments = parts.slice(1).filter(Boolean);
+  if (segments.length < 2) return null;
+
+  const owner = segments[0].trim();
+  let repo = segments[1].trim();
+
+  if (repo.toLowerCase().endsWith(".git")) {
+    repo = repo.slice(0, -4);
+  }
+  repo = repo.replace(/\/+$/, "");
+
+  if (!repo || repo.toLowerCase() === ".git") return null;
+  if (owner.startsWith("-") || repo.startsWith("-")) return null;
+
+  const identRegex = /^[A-Za-z0-9_.-]{1,100}$/;
+  if (!identRegex.test(owner) || !identRegex.test(repo)) return null;
+
+  return { owner, repo, cleaned: `${owner}/${repo}` };
+}
+
 export default function NewProjectPage() {
   const router = useRouter();
   const [repoUrl, setRepoUrl] = useState("");
@@ -15,16 +51,19 @@ export default function NewProjectPage() {
   const [error, setError] = useState<string | null>(null);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
 
+  const cleanInfo = parseCleanOwnerRepo(repoUrl);
+
   // Debounced estimation when URL looks valid
   useEffect(() => {
     const trimmed = repoUrl.trim();
     const timer = setTimeout(async () => {
-      if (!trimmed.startsWith("https://github.com/") || trimmed.split("/").length < 5) {
+      const parsed = parseCleanOwnerRepo(trimmed);
+      if (!parsed) {
         setEstimate(null);
         return;
       }
       setEstimating(true);
-      const est = await estimateProject(trimmed);
+      const est = await estimateProject(`https://github.com/${parsed.cleaned}`);
       setEstimating(false);
       if (est) {
         setEstimate(est);
@@ -41,14 +80,21 @@ export default function NewProjectPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!repoUrl.trim() || loading) return;
+    const trimmed = repoUrl.trim();
+    if (!trimmed || loading) return;
+
+    const parsed = parseCleanOwnerRepo(trimmed);
+    if (!parsed) {
+      setError("Enter a GitHub repository link like https://github.com/owner/repo");
+      return;
+    }
 
     setLoading(true);
     setError(null);
     setInstallUrl(null);
 
     try {
-      const res = await createProject(repoUrl.trim(), historyMonths);
+      const res = await createProject(`https://github.com/${parsed.cleaned}`, historyMonths);
       if (res.ok && res.data && typeof res.data.id === "string") {
         router.push(`/projects/${res.data.id}`);
       } else {
@@ -125,11 +171,19 @@ export default function NewProjectPage() {
                 id="repo_url"
                 type="text"
                 value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
+                onChange={(e) => {
+                  setRepoUrl(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="https://github.com/owner/repo"
                 required
                 className="w-full h-[36px] px-3 font-mono text-[13px] bg-surface border border-border rounded-[4px] text-text placeholder:text-text-muted/60 focus:outline-none focus:border-border-strong"
               />
+              {cleanInfo && (
+                <p className="mt-1.5 text-[12px] font-mono text-text">
+                  Will analyze: {cleanInfo.cleaned}
+                </p>
+              )}
               <p className="mt-2 text-[12px] text-text-muted">
                 Public repositories work immediately. For private repositories, install the Provenance GitHub App on the repository first.
               </p>

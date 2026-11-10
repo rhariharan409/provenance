@@ -109,6 +109,83 @@ def _update_project_progress(db: Session, project: Project, step: str, percent: 
         pass
 
 
+REPO_URL_ERROR_MESSAGE = "Enter a GitHub repository link like https://github.com/owner/repo"
+REPO_IDENT_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def normalize_repo_url(raw: Any) -> Tuple[str, str, str]:
+    """
+    Normalizes a GitHub repository URL:
+    - trim whitespace; accept http or https or no scheme; accept github.com and www.github.com only
+    - strip a trailing ".git" from the repo name (case-insensitive) BEFORE any API call or database save,
+      strip trailing slashes, and ignore anything after the repo name (/tree/..., /blob/..., /issues, query strings, #fragments)
+    - owner and repo must match ^[A-Za-z0-9_.-]{1,100}$ and must not start with "-"; a repo literally named ".git" or empty is rejected
+    - canonical_url is always https://github.com/{owner}/{repo}
+    - reject other hosts, ssh (git@github.com:...), file:, extra schemes, and anything else with a plain message
+    Returns (owner, repo, canonical_url).
+    """
+    if not raw or not isinstance(raw, str):
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    cleaned = raw.strip()
+    if not cleaned:
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    # Reject ssh (git@...), file:, and anything with @
+    if "@" in cleaned or cleaned.lower().startswith("file:"):
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    # Parse scheme if present
+    if "://" in cleaned:
+        scheme, rest = cleaned.split("://", 1)
+        if scheme.lower() not in ("http", "https"):
+            raise ValueError(REPO_URL_ERROR_MESSAGE)
+    else:
+        rest = cleaned
+
+    # Strip query strings and fragment
+    rest = rest.split("#", 1)[0].split("?", 1)[0]
+
+    # Split host and path
+    parts = rest.split("/", 1)
+    host = parts[0].strip().lower()
+    if host not in ("github.com", "www.github.com"):
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    if len(parts) < 2:
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    path = parts[1].strip("/")
+    path_segments = [s.strip() for s in path.split("/") if s.strip()]
+    if len(path_segments) < 2:
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    owner = path_segments[0]
+    repo = path_segments[1]
+
+    # Strip trailing .git (case-insensitive) BEFORE validation or use
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+
+    # Strip trailing slashes
+    repo = repo.strip("/")
+
+    # Reject repo literally named .git (or empty after stripping)
+    if not repo or repo.lower() == ".git":
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    # Reject names starting with '-'
+    if owner.startswith("-") or repo.startswith("-"):
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    # Validate regex ^[A-Za-z0-9_.-]{1,100}$
+    if not REPO_IDENT_PATTERN.match(owner) or not REPO_IDENT_PATTERN.match(repo):
+        raise ValueError(REPO_URL_ERROR_MESSAGE)
+
+    canonical_url = f"https://github.com/{owner}/{repo}"
+    return owner, repo, canonical_url
+
+
 def validate_and_parse_github_url(url: str) -> Tuple[str, str, str]:
     """
     Validates the GitHub URL strictly:
@@ -369,6 +446,9 @@ def run_collection(
                     else:
                         set_progress(project.id, "Cloning repository...", 0, 100, db_factory=db_factory)
 
+                    canonical_url = f"https://github.com/{owner}/{repo}"
+                    clone_url = f"{canonical_url}.git"
+
                     # Attempt 1: Partial clone with --filter=blob:none --no-checkout --bare
                     partial_clone_cmd = [
                         "git",
@@ -386,7 +466,7 @@ def run_collection(
                     if project.history_since:
                         shallow_date = project.history_since.strftime("%Y-%m-%d")
                         partial_clone_cmd.append(f"--shallow-since={shallow_date}")
-                    partial_clone_cmd.extend(["--", f"https://github.com/{owner}/{repo}.git", clone_path])
+                    partial_clone_cmd.extend(["--", clone_url, clone_path])
 
                     proc = subprocess.run(
                         partial_clone_cmd,
@@ -413,7 +493,7 @@ def run_collection(
                             "-c",
                             "core.fsmonitor=false",
                             "--",
-                            f"https://github.com/{owner}/{repo}.git",
+                            clone_url,
                             clone_path,
                         ]
                         proc = subprocess.run(
@@ -446,7 +526,7 @@ def run_collection(
                             "-c",
                             "core.fsmonitor=false",
                             "--",
-                            f"https://github.com/{owner}/{repo}.git",
+                            clone_url,
                             clone_path,
                         ]
                         proc = subprocess.run(

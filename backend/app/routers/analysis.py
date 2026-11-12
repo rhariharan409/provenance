@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from app.config import settings
 
 from app.db import get_db
 from app.deps import get_current_user
